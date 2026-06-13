@@ -645,3 +645,1080 @@ function StatusBadge({ status }: { status: TaskStatus }) {
   );
 }
 
+export default function HomePage() {
+  const [hydrated, setHydrated] = useState(false);
+  const [userMode, setUserMode] = useState<UserMode | null>(null);
+  const [activeTab, setActiveTab] = useState<TabKey>("home");
+  const [lastPrimaryTab, setLastPrimaryTab] = useState<TabKey>("home");
+  const [isPeopleDrawerOpen, setIsPeopleDrawerOpen] = useState(false);
+  const [elders, setElders] = useState<Elder[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [elderMessages, setElderMessages] = useState<Message[]>([]);
+  const [assistantMemories, setAssistantMemories] = useState<AssistantMemory[]>([]);
+  const [currentElderId, setCurrentElderId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [input, setInput] = useState("");
+  const [elderInput, setElderInput] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSummaryExpanded, setIsSummaryExpanded] = useState(true);
+  const [showAddElder, setShowAddElder] = useState(false);
+  const [editingElderId, setEditingElderId] = useState<string | null>(null);
+  const [assistantProfile, setAssistantProfile] = useState<AssistantProfile>(DEFAULT_ASSISTANT_PROFILE);
+  const [callSession, setCallSession] = useState<CallSession>({
+    open: false,
+    audience: "child",
+    taskId: null,
+    phase: "dialing",
+  });
+  const [agentCall, setAgentCall] = useState<AgentCallState>({
+    active: false,
+    sessionId: null,
+    phase: "idle",
+    transcript: [],
+    stage: "",
+    taskSlots: {},
+    careInsight: null,
+    isProcessing: false,
+    finalizeResult: null,
+  });
+  const [agentElderInput, setAgentElderInput] = useState("");
+  const [schedulerResult, setSchedulerResult] = useState<string | null>(null);
+  const [elderForm, setElderForm] = useState<ElderFormState>({
+    relation: "妈妈",
+    displayName: "",
+    phone: "",
+    availableTime: "08:00-21:00",
+    focus: ["吃药"],
+    communicationPreference: ["温柔一点"],
+    responseHabit: "",
+  });
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved) as StoredState;
+      setUserMode(parsed.userMode ?? null);
+      setElders(parsed.elders);
+      setTasks(parsed.tasks);
+      setNotifications(parsed.notifications);
+      setMessages((parsed.messages ?? []).map(stampMessage));
+      setElderMessages((parsed.elderMessages ?? []).map(stampMessage));
+      setCurrentElderId(parsed.currentElderId);
+      setAssistantProfile(parsed.assistantProfile ?? DEFAULT_ASSISTANT_PROFILE);
+      setAssistantMemories(parsed.assistantMemories ?? []);
+    }
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const snapshot: StoredState = {
+      userMode,
+      elders,
+      tasks,
+      notifications,
+      messages,
+      elderMessages,
+      currentElderId,
+      assistantProfile,
+      assistantMemories,
+    };
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+  }, [hydrated, userMode, elders, tasks, notifications, messages, elderMessages, currentElderId, assistantProfile, assistantMemories]);
+
+  const currentElder = useMemo(
+    () => elders.find((elder) => elder.id === currentElderId) ?? null,
+    [elders, currentElderId],
+  );
+
+  const selectedTask = useMemo(
+    () => tasks.find((task) => task.id === selectedTaskId) ?? null,
+    [tasks, selectedTaskId],
+  );
+
+  const latestElderTask = useMemo(
+    () => getLatestTaskForElder(tasks, currentElderId),
+    [tasks, currentElderId],
+  );
+
+  const currentCallTask = useMemo(
+    () => tasks.find((task) => task.id === callSession.taskId) ?? latestElderTask,
+    [tasks, callSession.taskId, latestElderTask],
+  );
+
+  const currentSummary = useMemo(() => summarizeTasks(tasks, currentElder), [tasks, currentElder]);
+
+  useEffect(() => {
+    if (activeTab === "home" || activeTab === "tasks" || activeTab === "profile") {
+      setLastPrimaryTab(activeTab);
+    }
+  }, [activeTab]);
+
+  const callProgressSteps = [
+    {
+      key: "dialing",
+      label: "发起提醒",
+      hint: "正在联系长辈",
+      active: callSession.phase === "dialing",
+      done: true,
+      onClick: () => setCallSession((prev) => ({ ...prev, phase: "dialing" })),
+    },
+    {
+      key: "connected",
+      label: "已接通",
+      hint: "确认对方接起",
+      active: callSession.phase === "connected",
+      done: callSession.phase === "connected" || currentCallTask?.status === "reached" || currentCallTask?.status === "confirmed" || currentCallTask?.status === "completed",
+      onClick: () => updateCallPhase("connected"),
+    },
+    {
+      key: "confirmed",
+      label: "已确认",
+      hint: "知道了、收到了",
+      active: currentCallTask?.status === "confirmed",
+      done: currentCallTask?.status === "confirmed" || currentCallTask?.status === "completed",
+      onClick: () => {
+        if (!currentCallTask) return;
+        applyTaskStatus(currentCallTask, "confirmed", "电话已确认");
+        closeCall();
+      },
+    },
+    {
+      key: "completed",
+      label: "已完成",
+      hint: "任务已经做完",
+      active: currentCallTask?.status === "completed",
+      done: currentCallTask?.status === "completed",
+      onClick: () => {
+        if (!currentCallTask) return;
+        applyTaskStatus(currentCallTask, "completed", "电话回访确认已完成");
+        closeCall();
+      },
+    },
+  ];
+
+  useEffect(() => {
+    if (!hydrated) return;
+
+    const dayKey = todayKey();
+    const todayChildMessages = messages.filter((message) => (message.dayKey ?? dayKey) === dayKey);
+    const todayElderMessages = elderMessages.filter((message) => (message.dayKey ?? dayKey) === dayKey);
+
+    if (todayChildMessages.length === 0 && todayElderMessages.length === 0) return;
+
+    const nextMemory = buildAssistantMemory(dayKey, todayChildMessages, todayElderMessages, currentElder);
+    setAssistantMemories((prev) => {
+      const merged = [...prev.filter((item) => item.dayKey !== dayKey), nextMemory];
+      return merged.sort((a, b) => a.dayKey.localeCompare(b.dayKey)).slice(-14);
+    });
+  }, [hydrated, messages, elderMessages, currentElder]);
+
+  const sortedTasks = useMemo(
+    () => [...tasks].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+    [tasks],
+  );
+
+  function appendAssistantMessage(message: Message) {
+    setMessages((prev) => [...prev, stampMessage(message)]);
+  }
+
+  function appendElderMessage(message: Message) {
+    setElderMessages((prev) => [...prev, stampMessage(message)]);
+  }
+
+  function addNotification(item: Omit<NotificationItem, "id" | "time">) {
+    setNotifications((prev) => [
+      { id: uid("notice"), time: nowLabel(), ...item },
+      ...prev,
+    ]);
+  }
+
+  function resetForm(relation = "妈妈") {
+    setElderForm({
+      relation,
+      displayName: "",
+      phone: "",
+      availableTime: "08:00-21:00",
+      focus: ["吃药"],
+      communicationPreference: ["温柔一点"],
+      responseHabit: "",
+    });
+  }
+
+  function createElder() {
+    if (!elderForm.displayName.trim() || !elderForm.phone.trim()) return;
+
+    if (editingElderId) {
+      const targetId = editingElderId;
+      const updatedDisplayName = elderForm.displayName.trim();
+      const updatedRelation = elderForm.relation;
+      const updatedPhone = elderForm.phone.trim();
+      const updatedAvailableTime = elderForm.availableTime;
+      const updatedResponseHabit = elderForm.responseHabit.trim();
+
+      setElders((prev) =>
+        prev.map((elder) => {
+          if (elder.id !== targetId) return elder;
+          return {
+            ...elder,
+            relation: updatedRelation,
+            displayName: updatedDisplayName,
+            phone: updatedPhone,
+            availableTime: updatedAvailableTime,
+            responseHabit: updatedResponseHabit,
+            nicknames: buildNicknames(updatedRelation, updatedDisplayName),
+          };
+        }),
+      );
+
+      setTasks((prev) =>
+        prev.map((task) => (task.elderId === targetId ? { ...task, elderDisplayName: updatedDisplayName } : task)),
+      );
+
+      setEditingElderId(null);
+      setShowAddElder(false);
+      setActiveTab("profile");
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "text",
+        content: `好，我把${updatedDisplayName}的档案更新好了。`,
+      });
+      return;
+    }
+
+    const elder: Elder = {
+      id: uid("elder"),
+      relation: elderForm.relation,
+      displayName: elderForm.displayName.trim(),
+      phone: elderForm.phone.trim(),
+      availableTime: elderForm.availableTime,
+      focus: elderForm.focus,
+      communicationPreference: elderForm.communicationPreference,
+      responseHabit: elderForm.responseHabit.trim(),
+      nicknames: buildNicknames(elderForm.relation, elderForm.displayName.trim()),
+      recentResponseAt: "刚刚添加",
+    };
+
+    setElders((prev) => [...prev, elder]);
+    setCurrentElderId(elder.id);
+    setShowAddElder(false);
+    setActiveTab("home");
+    resetForm(elderForm.relation);
+    appendAssistantMessage({
+      id: uid("msg"),
+      role: "assistant",
+      kind: "text",
+      content: `${elder.displayName}已经加入啦。以后没有特别说明时，我会默认先帮你照看 TA。`,
+    });
+    appendElderMessage({
+      id: uid("msg"),
+      role: "assistant",
+      kind: "text",
+      content: `你好呀，${elder.displayName}。我是家里小助理，以后提醒、电话和小纸条都会从我这里来。`,
+    });
+  }
+
+  function beginEditElder(elder: Elder) {
+    setEditingElderId(elder.id);
+    setShowAddElder(true);
+    setActiveTab("profile");
+    setElderForm({
+      relation: elder.relation,
+      displayName: elder.displayName,
+      phone: elder.phone,
+      availableTime: elder.availableTime,
+      focus: elder.focus,
+      communicationPreference: elder.communicationPreference,
+      responseHabit: elder.responseHabit,
+    });
+    setCurrentElderId(elder.id);
+  }
+
+  function loadDemoData() {
+    const demo = buildDemoState();
+    setUserMode(demo.userMode);
+    setElders(demo.elders);
+    setTasks(demo.tasks);
+    setNotifications(demo.notifications);
+    setMessages(demo.messages.map(stampMessage));
+    setElderMessages(demo.elderMessages.map(stampMessage));
+    setAssistantMemories(demo.assistantMemories ?? []);
+    setCurrentElderId(demo.currentElderId);
+    setAssistantProfile(demo.assistantProfile);
+    setActiveTab("home");
+  }
+
+  function markDraftCreated(draftId: string) {
+    setMessages((prev) =>
+      prev.map((message) => ({
+        ...message,
+        drafts: message.drafts?.map((draft) =>
+          draft.id === draftId ? { ...draft, created: true } : draft,
+        ),
+      })),
+    );
+  }
+
+  function createTaskFromDraft(draft: TaskDraft) {
+    if (draft.created) return;
+
+    const nextTask: Task = {
+      id: uid("task"),
+      title: draft.title,
+      type: draft.type,
+      elderId: draft.elderId,
+      elderDisplayName: draft.elderDisplayName,
+      content: draft.content,
+      remindLabel: draft.remindLabel,
+      repeatRule: draft.repeatRule,
+      channel: draft.channel,
+      needConfirmation: draft.needConfirmation,
+      needResult: draft.needResult,
+      status: "scheduled",
+      createdAt: nowLabel(),
+      updatedAt: nowLabel(),
+      logs: [buildExecutionLog("已创建任务"), buildExecutionLog("已进入待提醒队列")],
+    };
+
+    setTasks((prev) => [nextTask, ...prev]);
+    setSelectedTaskId(nextTask.id);
+    setActiveTab("tasks");
+    markDraftCreated(draft.id);
+    addNotification({
+      title: `${draft.elderDisplayName}的提醒已创建`,
+      detail: `${draft.remindLabel}会通过${draft.channel}触达，回执状态会继续同步给你。`,
+      level: "info",
+    });
+    appendAssistantMessage({
+      id: uid("msg"),
+      role: "assistant",
+      kind: "text",
+      content: `我已经帮你排好了，到了 ${draft.remindLabel} 会先联系${draft.elderDisplayName}。`,
+    });
+  }
+
+  function updateTask(taskId: string, updater: (task: Task) => Task) {
+    setTasks((prev) =>
+      prev.map((task) => {
+        if (task.id !== taskId) return task;
+        return updater(task);
+      }),
+    );
+  }
+
+  function applyTaskStatus(task: Task, status: TaskStatus, result?: string) {
+    updateTask(task.id, (current) => {
+      const logs = [...current.logs];
+      let event = "状态已更新";
+      if (status === "reached") event = `${current.elderDisplayName}已接听，提醒已触达`;
+      if (status === "confirmed") event = `${current.elderDisplayName}回复：知道了`;
+      if (status === "completed") event = `${current.elderDisplayName}回复：${result ?? "做完了"}`;
+      if (status === "need_review") event = `${current.elderDisplayName}有一条回复待查看`;
+      if (status === "timeout") event = "两次提醒后仍未确认，已通知家属";
+
+      const nextTask = {
+        ...current,
+        status,
+        result,
+        updatedAt: nowLabel(),
+        logs: [...logs, buildExecutionLog(event)],
+      };
+      return nextTask;
+    });
+
+    if (status === "reached") {
+      addNotification({
+        title: `${task.elderDisplayName}已接到提醒`,
+        detail: `${task.title} 已触达，接下来等待确认回执。`,
+        level: "info",
+      });
+    }
+    if (status === "confirmed") {
+      addNotification({
+        title: `${task.elderDisplayName}说知道了`,
+        detail: `${task.title} 已确认收到。你可以先放心一点。`,
+        level: "success",
+      });
+    }
+    if (status === "completed") {
+      addNotification({
+        title: `${task.elderDisplayName}已完成`,
+        detail: result ? `回复：${result}` : `${task.title} 已完成。`,
+        level: "success",
+      });
+    }
+    if (status === "need_review") {
+      addNotification({
+        title: `${task.elderDisplayName}有一条回复待查看`,
+        detail: "系统还没完全听懂，建议你点开任务详情看一下。",
+        level: "review",
+      });
+    }
+    if (status === "timeout") {
+      addNotification({
+        title: `${task.elderDisplayName}暂时还没回应`,
+        detail: "我已经尝试两次提醒。你可以稍后亲自联系一下。",
+        level: "warning",
+      });
+    }
+  }
+
+  function sendNote(version: NoteVersion) {
+    const elderName = currentElder?.displayName ?? "长辈";
+    addNotification({
+      title: `已把小纸条发给${elderName}`,
+      detail: version.text,
+      level: "info",
+    });
+    appendAssistantMessage({
+      id: uid("msg"),
+      role: "assistant",
+      kind: "text",
+      content: `这张小纸条我已经替你备好了：${version.text}`,
+    });
+    appendElderMessage({
+      id: uid("msg"),
+      role: "assistant",
+      kind: "text",
+      content: version.text,
+    });
+  }
+
+  function openCall(task: Task | null, audience: UserMode) {
+    setCallSession({
+      open: true,
+      audience,
+      taskId: task?.id ?? null,
+      phase: "dialing",
+    });
+  }
+
+  function updateCallPhase(phase: CallSession["phase"]) {
+    setCallSession((prev) => ({ ...prev, phase }));
+    const task = tasks.find((item) => item.id === callSession.taskId) ?? latestElderTask;
+    if (!task) return;
+
+    if (phase === "connected") {
+      applyTaskStatus(task, "reached");
+      appendElderMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "text",
+        content: `${task.elderDisplayName}，我是家里小助理。刚刚用电话提醒和你说一声：${task.content}`,
+      });
+      appendElderMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "text",
+        content: buildCareReply(task.elderDisplayName),
+      });
+    }
+
+    if (phase === "missed") {
+      applyTaskStatus(task, "timeout");
+      appendElderMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "text",
+        content: `${task.elderDisplayName}，我刚刚给你打电话没接通，没关系。你方便时回我一句，我再帮你把话带给孩子。`,
+      });
+    }
+  }
+
+  function closeCall() {
+    setCallSession((prev) => ({ ...prev, open: false, phase: "ended" }));
+  }
+
+  // ─── Agent Call API Handlers ────────────────────────────────────────────────
+  async function startAgentCall() {
+    setAgentCall({
+      active: true,
+      sessionId: null,
+      phase: "dialing",
+      transcript: [],
+      stage: "",
+      taskSlots: {},
+      careInsight: null,
+      isProcessing: true,
+      finalizeResult: null,
+    });
+
+    try {
+      // Fetch occurrences to find one we can call
+      const occRes = await fetch("/api/task-occurrences");
+      const occurrences = await occRes.json();
+
+      // Find an occurrence that hasn't been called yet, or use the most recent one
+      const callableOcc = Array.isArray(occurrences)
+        ? occurrences.find((o: { status: string }) => o.status === "pending" || o.status === "in_progress") ?? occurrences[occurrences.length - 1]
+        : null;
+
+      if (!callableOcc) {
+        // No occurrences - try triggering scheduler first
+        const tickRes = await fetch("/api/scheduler/tick", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        const tickData = await tickRes.json();
+        if (tickData.triggered && tickData.triggered.length > 0) {
+          const occId = tickData.triggered[0].callSessionId;
+          // If scheduler already started a call, use its session
+          setAgentCall((prev) => ({
+            ...prev,
+            sessionId: occId,
+            phase: "connected",
+            isProcessing: false,
+            transcript: [{ role: "assistant", text: "调度器已触发通话，请通过下方输入框模拟老人回复。" }],
+          }));
+          return;
+        }
+        setAgentCall((prev) => ({
+          ...prev,
+          phase: "ended",
+          isProcessing: false,
+          transcript: [{ role: "assistant", text: "当前没有可调度的任务实例，请先通过“调度器 Tick”创建。" }],
+        }));
+        return;
+      }
+
+      // Start the call via API
+      const startRes = await fetch("/api/calls/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task_occurrence_id: callableOcc.id }),
+      });
+      const startData = await startRes.json();
+
+      if (!startRes.ok) {
+        throw new Error(startData.error ?? "Failed to start call");
+      }
+
+      setAgentCall((prev) => ({
+        ...prev,
+        sessionId: startData.call_session_id,
+        phase: "connected",
+        stage: startData.stage ?? "",
+        isProcessing: false,
+        transcript: startData.initial_reply
+          ? [{ role: "assistant", text: startData.initial_reply }]
+          : [],
+      }));
+    } catch (err) {
+      setAgentCall((prev) => ({
+        ...prev,
+        phase: "ended",
+        isProcessing: false,
+        transcript: [{ role: "assistant", text: `呼叫失败: ${err instanceof Error ? err.message : "未知错误"}` }],
+      }));
+    }
+  }
+
+  async function sendAgentTurn() {
+    const trimmed = agentElderInput.trim();
+    if (!trimmed || agentCall.isProcessing || !agentCall.sessionId) return;
+
+    // Add elder message to transcript
+    setAgentCall((prev) => ({
+      ...prev,
+      isProcessing: true,
+      transcript: [...prev.transcript, { role: "elder" as const, text: trimmed }],
+    }));
+    setAgentElderInput("");
+
+    try {
+      const res = await fetch(`/api/calls/${agentCall.sessionId}/turn`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ speaker: "elder", elder_input: trimmed }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error ?? "Turn failed");
+
+      setAgentCall((prev) => ({
+        ...prev,
+        isProcessing: false,
+        stage: data.stage ?? prev.stage,
+        taskSlots: data.task_slots ?? prev.taskSlots,
+        transcript: [
+          ...prev.transcript,
+          { role: "assistant" as const, text: data.assistant_reply ?? "..." },
+        ],
+      }));
+
+      // Auto-finalize if call is ending
+      if (data.is_call_ending) {
+        setTimeout(() => finalizeAgentCall(), 800);
+      }
+    } catch (err) {
+      setAgentCall((prev) => ({
+        ...prev,
+        isProcessing: false,
+        transcript: [
+          ...prev.transcript,
+          { role: "assistant" as const, text: `处理失败: ${err instanceof Error ? err.message : "未知错误"}` },
+        ],
+      }));
+    }
+  }
+
+  async function finalizeAgentCall() {
+    if (!agentCall.sessionId) return;
+    setAgentCall((prev) => ({ ...prev, isProcessing: true }));
+
+    try {
+      const res = await fetch(`/api/calls/${agentCall.sessionId}/finalize`, {
+        method: "POST",
+      });
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error ?? "Finalize failed");
+
+      // Fetch care insight
+      let insight: AgentCareInsight | null = null;
+      if (data.care_insight_id) {
+        const insightRes = await fetch(`/api/care-insights`);
+        const insights = await insightRes.json();
+        const found = Array.isArray(insights)
+          ? insights.find((i: { id: string }) => i.id === data.care_insight_id)
+          : null;
+        if (found) {
+          insight = {
+            factualSummary: found.factualSummary ?? "",
+            relationshipInsight: found.relationshipInsight ?? "",
+            suggestedAction: found.suggestedAction ?? "",
+            suggestedMessage: found.suggestedMessage ?? "",
+          };
+        }
+      }
+
+      setAgentCall((prev) => ({
+        ...prev,
+        phase: "ended",
+        isProcessing: false,
+        careInsight: insight,
+        finalizeResult: {
+          summary: data.summary ?? "",
+          memoriesExtracted: data.memories_extracted ?? 0,
+          careInsightId: data.care_insight_id ?? null,
+        },
+      }));
+    } catch (err) {
+      setAgentCall((prev) => ({
+        ...prev,
+        phase: "ended",
+        isProcessing: false,
+        transcript: [
+          ...prev.transcript,
+          { role: "assistant" as const, text: `结算失败: ${err instanceof Error ? err.message : "未知错误"}` },
+        ],
+      }));
+    }
+  }
+
+  function closeAgentCall() {
+    setAgentCall({
+      active: false,
+      sessionId: null,
+      phase: "idle",
+      transcript: [],
+      stage: "",
+      taskSlots: {},
+      careInsight: null,
+      isProcessing: false,
+      finalizeResult: null,
+    });
+    setAgentElderInput("");
+  }
+
+  async function triggerSchedulerTick() {
+    setSchedulerResult("正在触发调度器...");
+    try {
+      const res = await fetch("/api/scheduler/tick", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const data = await res.json();
+      const triggered = data.triggered ?? [];
+      const skipped = data.skipped ?? [];
+      const lines: string[] = [];
+      if (triggered.length > 0) {
+        lines.push(`✅ 触发 ${triggered.length} 个通话:`);
+        triggered.forEach((t: { elderDisplayName: string; callSessionId: string }) => {
+          lines.push(`  - ${t.elderDisplayName} (session: ${t.callSessionId})`);
+        });
+      }
+      if (skipped.length > 0) {
+        lines.push(`⏭️ 跳过 ${skipped.length} 个:`);
+        skipped.forEach((s: { templateId: string; reason: string }) => {
+          lines.push(`  - ${s.templateId}: ${s.reason}`);
+        });
+      }
+      if (lines.length === 0) lines.push("没有触发任何任务。");
+      setSchedulerResult(lines.join("\n"));
+    } catch (err) {
+      setSchedulerResult(`调度失败: ${err instanceof Error ? err.message : "未知错误"}`);
+    }
+  }
+
+  function handleElderSubmit(text = elderInput) {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    appendElderMessage({
+      id: uid("msg"),
+      role: "user",
+      kind: "text",
+      content: trimmed,
+    });
+    setElderInput("");
+
+    if (latestElderTask) {
+      if (trimmed.includes("做完") || trimmed.includes("好了") || trimmed.includes("挺好的")) {
+        applyTaskStatus(latestElderTask, "completed", trimmed);
+      } else if (trimmed.includes("知道") || trimmed.includes("收到")) {
+        applyTaskStatus(latestElderTask, "confirmed", trimmed);
+      } else {
+        applyTaskStatus(latestElderTask, "need_review", trimmed);
+      }
+    }
+
+    appendElderMessage({
+      id: uid("msg"),
+      role: "assistant",
+      kind: "text",
+      content:
+        trimmed.includes("挺好") || trimmed.includes("做完") || trimmed.includes("知道")
+          ? "我收到啦，你这边的情况我会好好告诉孩子，让 TA 放心一点。"
+          : "我收到啦，我会把这句话带给孩子。你要是还想说点别的，也可以继续告诉我。",
+    });
+  }
+
+  function runLocalAgentFlow(trimmed: string) {
+    const intent = inferIntent(trimmed);
+
+    if (intent === "add_elder") {
+      const hintedRelation = RELATION_OPTIONS.find((relation) => trimmed.includes(relation)) ?? "妈妈";
+      resetForm(hintedRelation);
+      setShowAddElder(true);
+      setActiveTab("profile");
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "text",
+        content: `没问题，我已经把“添加长辈”表单打开了。你补一下 ${hintedRelation} 的联系方式，我就能开始帮你记挂。`,
+      });
+      return;
+    }
+
+    if (intent === "rewrite_note") {
+      const target = detectTargetElders(trimmed, elders, currentElder)[0];
+      if (!target) {
+        appendAssistantMessage({
+          id: uid("msg"),
+          role: "assistant",
+          kind: "text",
+          content: "这句话我可以帮你改得更柔和一些。你想发给哪位长辈？",
+        });
+        return;
+      }
+      const noteVersions = buildNoteVersions(trimmed, target.displayName);
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "note",
+        content: "这句话有点着急，我帮你换成更温和的说法。",
+        noteVersions,
+      });
+      return;
+    }
+
+    if (intent === "query_status") {
+      const target = detectTargetElders(trimmed, elders, currentElder)[0] ?? currentElder;
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "summary",
+        content: summarizeTasks(tasks, target),
+      });
+      return;
+    }
+
+    if (intent === "create_task") {
+      const draftResult = buildTaskDrafts(trimmed, elders, currentElder);
+      if ("error" in draftResult) {
+        const errorMessage = draftResult.error ?? "这件事我还差一点信息，先帮你补齐。";
+        appendAssistantMessage({
+          id: uid("msg"),
+          role: "assistant",
+          kind: "text",
+          content: errorMessage,
+        });
+        return;
+      }
+
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "taskDraft",
+        content: "我帮你整理好了，确认一下就可以。",
+        drafts: draftResult.drafts,
+      });
+      return;
+    }
+
+    appendAssistantMessage({
+      id: uid("msg"),
+      role: "assistant",
+      kind: "text",
+      content: "我目前最擅长 3 件事：创建提醒、查回执、把话改得更温柔。你可以直接对我说一句完整的话试试。",
+    });
+  }
+
+  function applyAgentResponse(result: AgentServerResponse) {
+    if (result.openProfile) {
+      resetForm(result.relationHint && RELATION_OPTIONS.includes(result.relationHint) ? result.relationHint : "妈妈");
+      setShowAddElder(true);
+      setActiveTab("profile");
+    }
+
+    if (result.kind === "taskDraft" && result.drafts && result.drafts.length > 0) {
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "taskDraft",
+        content: result.content,
+        drafts: result.drafts.map((draft) => ({
+          ...draft,
+          id: uid("draft"),
+          created: false,
+        })),
+      });
+      return;
+    }
+
+    if (result.kind === "note" && result.noteVersions && result.noteVersions.length > 0) {
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "note",
+        content: result.content,
+        noteVersions: result.noteVersions,
+      });
+      return;
+    }
+
+    appendAssistantMessage({
+      id: uid("msg"),
+      role: "assistant",
+      kind: result.kind === "summary" ? "summary" : "text",
+      content: result.content,
+    });
+  }
+
+  async function handleAgentSubmit(text = input) {
+    const trimmed = text.trim();
+    if (!trimmed || isSubmitting) return;
+
+    const userMessage: Message = {
+      id: uid("msg"),
+      role: "user",
+      kind: "text",
+      content: trimmed,
+    };
+    setMessages((prev) => [...prev, stampMessage(userMessage)]);
+    setInput("");
+    setIsSubmitting(true);
+
+    try {
+      const response = await fetch("/api/agent", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          input: trimmed,
+          currentElderId,
+          assistantProfile,
+          recentMemories: assistantMemories.slice(-7).map((memory) => ({
+            dateLabel: memory.dateLabel,
+            summary: memory.summary,
+            childTranscript: memory.childTranscript,
+            elderTranscript: memory.elderTranscript,
+          })),
+          elders: elders.map((elder) => ({
+            id: elder.id,
+            relation: elder.relation,
+            displayName: elder.displayName,
+            availableTime: elder.availableTime,
+            communicationPreference: elder.communicationPreference,
+            nicknames: elder.nicknames,
+          })),
+          tasks: tasks.map((task) => ({
+            id: task.id,
+            title: task.title,
+            elderId: task.elderId,
+            elderDisplayName: task.elderDisplayName,
+            remindLabel: task.remindLabel,
+            status: task.status,
+          })),
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("agent-api-failed");
+      }
+
+      const result = (await response.json()) as AgentServerResponse;
+      applyAgentResponse(result);
+    } catch {
+      runLocalAgentFlow(trimmed);
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  if (!hydrated) {
+    return <main className="flex min-h-screen items-center justify-center text-sm text-stone-500">正在准备 Demo...</main>;
+  }
+
+  if (!userMode) {
+    return (
+      <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-4 py-8 sm:px-5 sm:py-10">
+        <div className="rounded-[28px] border border-orange-100 bg-white p-6 shadow-[0_20px_60px_rgba(242,153,110,0.15)]">
+          <div className="mb-6">
+            <p className="text-sm font-medium text-orange-500">突然有点惦记你们</p>
+            <h1 className="mt-2 text-2xl font-semibold text-stone-800">先选择你的身份</h1>
+            <p className="mt-2 text-sm leading-6 text-stone-500">
+              子女端负责发起惦记和查看回执；长辈端只保留家里小助理聊天、电话提醒和反馈。
+            </p>
+          </div>
+          <div className="space-y-3">
+            <button
+              type="button"
+              onClick={() => setUserMode("child")}
+              className="min-h-12 w-full rounded-2xl bg-[#F2996E] px-4 py-3 text-sm font-medium text-white"
+            >
+              我是子女
+            </button>
+            <button
+              type="button"
+              onClick={() => setUserMode("elder")}
+              className="min-h-12 w-full rounded-2xl bg-[#FFF1C7] px-4 py-3 text-sm font-medium text-stone-700"
+            >
+              我是长辈
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  if (elders.length === 0 && userMode === "elder") {
+    return (
+      <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-4 py-8 sm:px-5 sm:py-10">
+        <div className="rounded-[28px] border border-orange-100 bg-white p-6 shadow-[0_20px_60px_rgba(242,153,110,0.15)]">
+          <p className="text-sm font-medium text-orange-500">家里小助理</p>
+          <h1 className="mt-2 text-2xl font-semibold text-stone-800">还没有绑定长辈档案</h1>
+          <p className="mt-2 text-sm leading-6 text-stone-500">
+            先让子女端添加一位长辈，或者直接导入演示数据，我就能开始通过电话提醒、消息提醒和聊天反馈陪着跟进。
+          </p>
+          <div className="mt-6 space-y-3">
+            <button
+              type="button"
+              onClick={loadDemoData}
+              className="min-h-12 w-full rounded-2xl bg-[#F2996E] px-4 py-3 text-sm font-medium text-white"
+            >
+              导入演示数据
+            </button>
+            <button
+              type="button"
+              onClick={() => setUserMode("child")}
+              className="min-h-12 w-full rounded-2xl bg-[#FFF1C7] px-4 py-3 text-sm font-medium text-stone-700"
+            >
+              切换到子女端
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  if (elders.length === 0) {
+    return (
+      <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-4 py-8 sm:px-5 sm:py-10">
+        <div className="rounded-[28px] border border-orange-100 bg-white p-6 shadow-[0_20px_60px_rgba(242,153,110,0.15)]">
+          <div className="mb-6">
+            <p className="text-sm font-medium text-orange-500">突然有点惦记你们</p>
+            <h1 className="mt-2 text-2xl font-semibold text-stone-800">先添加一位你惦记的人</h1>
+            <p className="mt-2 text-sm leading-6 text-stone-500">
+              我会帮你把一句惦记，变成提醒、回执和更温柔的话。
+            </p>
+          </div>
+
+          <div className="space-y-4">
+            <label className="block text-sm text-stone-600">
+              TA 是你的？
+              <select
+                value={elderForm.relation}
+                onChange={(event) => setElderForm((prev) => ({ ...prev, relation: event.target.value }))}
+                className="mt-2 min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+              >
+                {RELATION_OPTIONS.map((option) => (
+                  <option key={option}>{option}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block text-sm text-stone-600">
+              你平时怎么称呼 TA？
+              <input
+                value={elderForm.displayName}
+                onChange={(event) => setElderForm((prev) => ({ ...prev, displayName: event.target.value }))}
+                placeholder="妈 / 爸 / 奶奶 / 王叔"
+                className="mt-2 min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+              />
+            </label>
+
+            <label className="block text-sm text-stone-600">
+              TA 的手机号？
+              <input
+                value={elderForm.phone}
+                onChange={(event) => setElderForm((prev) => ({ ...prev, phone: event.target.value }))}
+                placeholder="138xxxxxxx"
+                className="mt-2 min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+              />
+            </label>
+
+            <label className="block text-sm text-stone-600">
+              平时什么时候方便接电话？
+              <input
+                value={elderForm.availableTime}
+                onChange={(event) => setElderForm((prev) => ({ ...prev, availableTime: event.target.value }))}
+                className="mt-2 min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+              />
+            </label>
+          </div>
+
+          <div className="mt-6 space-y-3">
+            <button
+              type="button"
+              onClick={createElder}
+              className="min-h-12 w-full rounded-2xl bg-[#F2996E] px-4 py-3 text-sm font-medium text-white"
+            >
+              生成这位长辈的惦记助手
+            </button>
+            <button
+              type="button"
+              onClick={loadDemoData}
+              className="min-h-12 w-full rounded-2xl bg-[#FFF1C7] px-4 py-3 text-sm font-medium text-stone-700"
+            >
+              一键导入演示数据
+            </button>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
