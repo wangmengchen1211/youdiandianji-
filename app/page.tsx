@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useMemo, useState } from "react";
 
@@ -1722,3 +1722,1071 @@ export default function HomePage() {
     );
   }
 
+  if (userMode === "elder") {
+    return (
+      <main className="mx-auto min-h-screen max-w-md px-0 text-stone-800">
+        {callSession.open && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/45 p-4 backdrop-blur-sm">
+            <div className="w-full max-w-sm rounded-[36px] bg-stone-950 p-4 text-white shadow-2xl">
+              <div className="rounded-[28px] bg-[#1B1B1B] p-5">
+                <p className="text-center text-xs text-stone-400">小助理帮忙打电话</p>
+                <div className="mt-5 flex justify-center">
+                  <div className="flex h-24 w-24 items-center justify-center rounded-full bg-orange-300 text-3xl text-stone-900">
+                    助
+                  </div>
+                </div>
+                <p className="mt-4 text-center text-2xl font-semibold">{currentElder?.displayName ?? "长辈"}</p>
+                <p className="mt-2 text-center text-sm text-stone-400">
+                  {callSession.phase === "dialing" && "正在呼叫中..."}
+                  {callSession.phase === "connected" && "通话已接通"}
+                  {callSession.phase === "missed" && "暂时无人接听"}
+                  {callSession.phase === "ended" && "通话已结束"}
+                </p>
+                <div className="mt-5 flex items-end justify-center gap-2">
+                  {[28, 18, 30, 14, 26, 20].map((height, index) => (
+                    <span key={index} className="w-2 rounded-full bg-orange-300/80" style={{ height }} />
+                  ))}
+                </div>
+                <div className="mt-5 rounded-[24px] bg-white/8 p-4 text-sm leading-7 text-stone-100">
+                  {buildCallScript(currentCallTask, currentElder)}
+                </div>
+                <div className="mt-5 grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => updateCallPhase("connected")}
+                    className="min-h-12 rounded-2xl bg-emerald-500 px-4 py-3 text-sm font-medium"
+                  >
+                    模拟接通
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateCallPhase("missed")}
+                    className="min-h-12 rounded-2xl bg-rose-500 px-4 py-3 text-sm font-medium"
+                  >
+                    暂未接听
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (currentCallTask) applyTaskStatus(currentCallTask, "confirmed", "我知道了");
+                      closeCall();
+                    }}
+                    className="min-h-12 rounded-2xl bg-white/12 px-4 py-3 text-sm font-medium"
+                  >
+                    我知道了
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeCall}
+                    className="min-h-12 rounded-2xl bg-white/12 px-4 py-3 text-sm font-medium"
+                  >
+                    结束通话
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <section className="flex min-h-screen flex-col bg-[#FFF8F3]">
+          <div className="border-b border-orange-100 bg-[linear-gradient(180deg,#FFF7EE_0%,#FFFDF9_100%)] px-4 pb-3 pt-[max(16px,env(safe-area-inset-top))]">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-[17px] font-semibold text-stone-800">家里小助理</p>
+                <p className="mt-1 text-[15px] text-stone-700">{currentElder?.displayName ?? "妈妈"}，你好呀</p>
+                <p className="mt-1 text-[13px] text-orange-500/80">有事我会直接告诉你。</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setUserMode("child")}
+                className="min-h-12 rounded-full bg-orange-50 px-4 py-2 text-xs text-stone-600"
+              >
+                子女端
+              </button>
+            </div>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4">
+            <div className="space-y-3">
+              {elderMessages.map((message) => (
+                <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                  <div
+                    className={`max-w-[82%] rounded-[20px] px-4 py-3 text-[15px] leading-7 shadow-sm ${
+                      message.role === "user"
+                        ? "bg-[#F2996E] text-white shadow-[0_10px_24px_rgba(242,153,110,0.22)]"
+                        : "border border-orange-100 bg-[#FFFDFB] text-stone-700"
+                    }`}
+                  >
+                    {message.content}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="border-t border-orange-100 bg-[linear-gradient(180deg,#FFFDF9_0%,#FFF5EA_100%)] px-3 pb-[calc(12px+env(safe-area-inset-bottom))] pt-3">
+            <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
+              <button
+                type="button"
+                onClick={() => openCall(latestElderTask, "elder")}
+                className="min-h-10 shrink-0 rounded-full border border-orange-100 bg-[#FFF1C7] px-4 text-sm text-stone-700"
+              >
+                电话提醒
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (latestElderTask) {
+                    appendElderMessage({
+                      id: uid("msg"),
+                      role: "assistant",
+                      kind: "text",
+                      content: `${currentElder?.displayName ?? "您"}，提醒你一下：${latestElderTask.content}`,
+                    });
+                  }
+                }}
+                className="min-h-10 shrink-0 rounded-full border border-orange-100 bg-white px-4 text-sm text-stone-700"
+              >
+                看提醒
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  appendElderMessage({
+                    id: uid("msg"),
+                    role: "assistant",
+                    kind: "text",
+                    content: buildAssistantPreview(assistantProfile, currentElder?.displayName ?? "您"),
+                  })
+                }
+                className="min-h-10 shrink-0 rounded-full border border-orange-100 bg-white px-4 text-sm text-stone-700"
+              >
+                看小纸条
+              </button>
+            </div>
+
+            <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
+              {ELDER_QUICK_INPUTS.map((sample) => (
+                <button
+                  key={sample}
+                  type="button"
+                  onClick={() => setElderInput(sample)}
+                  className="min-h-10 shrink-0 rounded-full bg-orange-50 px-4 text-sm text-stone-600"
+                >
+                  {sample}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-end gap-2">
+              <textarea
+                value={elderInput}
+                onChange={(event) => setElderInput(event.target.value)}
+                placeholder="直接回复我..."
+                className="min-h-12 flex-1 resize-none rounded-[24px] border border-orange-100 bg-[#FFFDFB] px-4 py-3 text-[15px] text-stone-700 outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => handleElderSubmit()}
+                className="min-h-12 shrink-0 rounded-full bg-[#F2996E] px-5 py-2 text-sm font-medium text-white"
+              >
+                发送
+              </button>
+            </div>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  return (
+    <main
+      className={`mx-auto max-w-5xl px-3 py-4 text-stone-800 sm:px-4 sm:py-6 ${
+        activeTab === "home" ? "h-[100svh] overflow-hidden" : "min-h-screen"
+      }`}
+    >
+      {callSession.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(78,52,39,0.18)] p-4 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-[36px] border border-orange-100 bg-[linear-gradient(180deg,#FFF9F3_0%,#FFF3E7_100%)] p-4 shadow-[0_24px_60px_rgba(145,94,61,0.2)]">
+            <div className="rounded-[30px] border border-orange-100/80 bg-white/88 p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-medium tracking-[0.14em] text-orange-500">家里小助理来电</p>
+                  <p className="mt-2 text-2xl font-semibold text-stone-800">{currentElder?.displayName ?? "长辈"}</p>
+                  <p className="mt-1 text-sm text-stone-500">
+                    {callSession.phase === "dialing" && "正在轻轻提醒中"}
+                    {callSession.phase === "connected" && "已经接通，正在陪着说"}
+                    {callSession.phase === "missed" && "暂时没有接通"}
+                    {callSession.phase === "ended" && "这次通话先结束了"}
+                  </p>
+                </div>
+                <div className="rounded-full bg-[#FFF1C7] px-3 py-1 text-xs font-medium text-orange-600">
+                  {currentCallTask?.title ?? "问候一下"}
+                </div>
+              </div>
+
+              <div className="mt-5 flex justify-center">
+                <div className="flex h-24 w-24 items-center justify-center rounded-full bg-[linear-gradient(180deg,#F6B58C_0%,#F2996E_100%)] text-3xl font-semibold text-white shadow-[0_14px_30px_rgba(242,153,110,0.3)]">
+                  助
+                </div>
+              </div>
+
+              <div className="mt-5 rounded-[24px] border border-orange-100 bg-[#FFF8F3] p-4 text-sm leading-7 text-stone-700">
+                {buildCallScript(currentCallTask, currentElder)}
+              </div>
+
+              <div className="mt-5">
+                <p className="mb-2 text-xs text-stone-500">这通提醒现在走到这里</p>
+                <div className="flex gap-3 overflow-x-auto pb-2">
+                  {callProgressSteps.map((step, index) => (
+                    <div key={step.key} className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={step.onClick}
+                        className={`min-h-[84px] min-w-[118px] rounded-[22px] border px-4 py-3 text-left ${
+                          step.active
+                            ? "border-orange-200 bg-orange-50 text-stone-800"
+                            : step.done
+                              ? "border-emerald-200 bg-emerald-50 text-stone-800"
+                              : "border-stone-200 bg-stone-50 text-stone-500"
+                        }`}
+                      >
+                        <p className="text-sm font-medium">{step.label}</p>
+                        <p className="mt-1 text-xs">{step.hint}</p>
+                      </button>
+                      {index < callProgressSteps.length - 1 && <span className="text-stone-300">-</span>}
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => updateCallPhase("missed")}
+                    className="min-h-10 rounded-full border border-orange-100 bg-white px-4 text-xs text-stone-600"
+                  >
+                    暂时没接到
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeCall}
+                    className="min-h-10 rounded-full border border-orange-100 bg-white px-4 text-xs text-stone-600"
+                  >
+                    先收起
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Agent Call Modal ──────────────────────────────────────── */}
+      {agentCall.active && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/50 p-4 backdrop-blur-sm">
+          <div className="flex h-[90vh] w-full max-w-lg flex-col rounded-[36px] border border-orange-100 bg-[linear-gradient(180deg,#FFF9F3_0%,#FFF3E7_100%)] p-4 shadow-2xl">
+            {/* Header */}
+            <div className="rounded-[28px] border border-orange-100/80 bg-white/90 p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-medium tracking-[0.14em] text-orange-500">
+                    {agentCall.phase === "dialing" && "🤖 Agent 正在呼叫..."}
+                    {agentCall.phase === "connected" && "🟢 Agent 通话中"}
+                    {agentCall.phase === "ended" && "✅ 通话已结束"}
+                  </p>
+                  <p className="mt-1 text-lg font-semibold text-stone-800">{currentElder?.displayName ?? "长辈"}</p>
+                  {agentCall.stage && (
+                    <p className="mt-1 text-xs text-stone-500">
+                      当前阶段: <span className="rounded-full bg-orange-50 px-2 py-0.5 text-orange-600">{agentCall.stage}</span>
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={closeAgentCall}
+                  className="min-h-8 rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-600"
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+
+            {/* Transcript */}
+            <div className="mt-3 min-h-0 flex-1 overflow-y-auto rounded-[24px] border border-orange-100 bg-white/80 p-3">
+              <div className="space-y-2">
+                {agentCall.transcript.map((entry, idx) => (
+                  <div key={idx} className={`flex ${entry.role === "elder" ? "justify-end" : "justify-start"}`}>
+                    <div
+                      className={`max-w-[85%] rounded-[18px] px-3 py-2 text-sm leading-6 ${
+                        entry.role === "elder"
+                          ? "bg-[#F2996E] text-white"
+                          : "border border-orange-100 bg-[#FFFDFB] text-stone-700"
+                      }`}
+                    >
+                      <p className="mb-1 text-[10px] opacity-60">{entry.role === "elder" ? "👵 长辈" : "🤖 小助理"}</p>
+                      {entry.text}
+                    </div>
+                  </div>
+                ))}
+                {agentCall.isProcessing && (
+                  <div className="flex justify-start">
+                    <div className="rounded-[18px] border border-orange-100 bg-[#FFFDFB] px-3 py-2 text-sm text-stone-400">
+                      Agent 思考中...
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Input area (when connected) */}
+            {agentCall.phase === "connected" && (
+              <div className="mt-3 flex items-end gap-2">
+                <textarea
+                  value={agentElderInput}
+                  onChange={(e) => setAgentElderInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendAgentTurn(); } }}
+                  placeholder="模拟老人说话... (Enter 发送)"
+                  rows={2}
+                  className="min-h-12 flex-1 resize-none rounded-[20px] border border-orange-100 bg-white px-3 py-2 text-sm text-stone-700 outline-none"
+                />
+                <button
+                  type="button"
+                  disabled={agentCall.isProcessing}
+                  onClick={sendAgentTurn}
+                  className="min-h-12 shrink-0 rounded-full bg-[#F2996E] px-4 py-2 text-sm font-medium text-white disabled:bg-orange-200"
+                >
+                  发送
+                </button>
+                <button
+                  type="button"
+                  disabled={agentCall.isProcessing}
+                  onClick={finalizeAgentCall}
+                  className="min-h-12 shrink-0 rounded-full bg-rose-500 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                >
+                  结束
+                </button>
+              </div>
+            )}
+
+            {/* Care Insight Card (when ended) */}
+            {agentCall.phase === "ended" && agentCall.careInsight && (
+              <div className="mt-3 overflow-y-auto rounded-[24px] border border-emerald-200 bg-emerald-50 p-4">
+                <p className="mb-3 text-xs font-semibold tracking-wide text-emerald-700">💡 子女端洞察</p>
+                <div className="space-y-2 text-sm text-stone-700">
+                  <div>
+                    <p className="text-xs font-medium text-stone-500">事实摘要</p>
+                    <p>{agentCall.careInsight.factualSummary}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium text-stone-500">关系洞察</p>
+                    <p>{agentCall.careInsight.relationshipInsight}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs font-medium text-stone-500">建议行动</p>
+                    <p>{agentCall.careInsight.suggestedAction}</p>
+                  </div>
+                  {agentCall.careInsight.suggestedMessage && (
+                    <div>
+                      <p className="text-xs font-medium text-stone-500">可发送消息</p>
+                      <div className="mt-1 rounded-xl bg-white p-2 text-sm text-stone-600">
+                        {agentCall.careInsight.suggestedMessage}
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {agentCall.finalizeResult && (
+                  <p className="mt-3 text-xs text-stone-400">
+                    提取记忆: {agentCall.finalizeResult.memoriesExtracted} 条
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Finalize result (when ended, no insight) */}
+            {agentCall.phase === "ended" && !agentCall.careInsight && agentCall.finalizeResult && (
+              <div className="mt-3 rounded-[24px] border border-stone-200 bg-stone-50 p-4 text-sm text-stone-600">
+                <p>{agentCall.finalizeResult.summary || "通话已结束，未生成洞察。"}</p>
+                <p className="mt-1 text-xs text-stone-400">提取记忆: {agentCall.finalizeResult.memoriesExtracted} 条</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {userMode === "child" && (
+        <button
+          type="button"
+          onClick={() => setActiveTab((prev) => (prev === "notifications" ? lastPrimaryTab : "notifications"))}
+          className={`fixed right-3 top-3 z-40 inline-flex min-h-10 items-center gap-2 rounded-full border px-4 text-xs font-medium shadow-sm backdrop-blur sm:right-4 sm:top-4 ${
+            activeTab === "notifications"
+              ? "border-orange-200 bg-[#F2996E] text-white"
+              : "border-orange-100 bg-white/90 text-stone-700"
+          }`}
+        >
+          通知
+          {notifications.length > 0 && (
+            <span
+              className={`inline-flex min-w-5 items-center justify-center rounded-full px-1.5 py-0.5 text-[11px] ${
+                activeTab === "notifications" ? "bg-white/20 text-white" : "bg-orange-50 text-orange-600"
+              }`}
+            >
+              {Math.min(99, notifications.length)}
+            </span>
+          )}
+        </button>
+      )}
+
+      {isPeopleDrawerOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-stone-900/30 backdrop-blur-[2px]"
+          onClick={() => setIsPeopleDrawerOpen(false)}
+        >
+          <aside
+            className="h-full w-full max-w-sm overflow-y-auto border-r border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(47,41,36,0.16)]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="rounded-[24px] bg-[#FFF1C7] p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium text-orange-600">我惦记的人</p>
+                  <p className="mt-2 text-lg font-semibold">切换长辈，不会清空当前聊天记录</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsPeopleDrawerOpen(false)}
+                  className="min-h-12 rounded-full bg-white/80 px-4 py-2 text-xs text-stone-600"
+                >
+                  收起
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              {elders.map((elder) => {
+                const elderTasks = tasks.filter((task) => task.elderId === elder.id);
+                const doneCount = elderTasks.filter((task) => task.status === "completed").length;
+                const pendingCount = elderTasks.filter((task) =>
+                  ["scheduled", "unconfirmed", "timeout", "need_review"].includes(task.status),
+                ).length;
+                const active = elder.id === currentElderId;
+
+                return (
+                  <button
+                    key={elder.id}
+                    type="button"
+                    onClick={() => {
+                      setCurrentElderId(elder.id);
+                      setIsPeopleDrawerOpen(false);
+                    }}
+                className={`min-h-24 w-full rounded-2xl border px-4 py-3 text-left ${active ? "border-orange-300 bg-orange-50/70" : "border-stone-100 bg-stone-50/50"}`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <p className="font-medium">{elder.displayName}</p>
+                      <span className="text-xs text-stone-500">{active ? "当前" : elder.relation}</span>
+                    </div>
+                    <p className="mt-2 text-sm text-stone-600">
+                      今日：{doneCount} 完成 / {pendingCount} 待跟进
+                    </p>
+                    <p className="mt-1 text-xs text-stone-500">最近回应：{elder.recentResponseAt ?? "暂无"}</p>
+                  </button>
+                );
+              })}
+            </div>
+          </aside>
+        </div>
+      )}
+
+      <section className={activeTab === "home" ? "flex h-full flex-col overflow-hidden pb-[74px]" : "space-y-3 pb-24"}>
+        {activeTab === "home" && (
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] border border-orange-100 bg-[#FFF8F3] shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
+            <div className="border-b border-orange-100 bg-[linear-gradient(180deg,#FFF7EE_0%,#FFFDF9_100%)] px-4 py-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <p className="text-[17px] font-semibold text-stone-800">家里小助理</p>
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab("assistant")}
+                      className="min-h-8 rounded-full border border-orange-100 bg-white px-3 text-[11px] font-medium text-orange-600"
+                    >
+                      性格
+                    </button>
+                  </div>
+                  <p className="mt-1 text-[15px] text-stone-700">想到什么就说，我来帮你整理。</p>
+                  <div className="mt-2 flex items-center gap-2">
+                    <p className="text-[13px] text-orange-500/80">
+                      当前长辈：{currentElder?.relation ?? currentElder?.displayName ?? "未选择"}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setIsPeopleDrawerOpen(true)}
+                      className="min-h-8 rounded-full border border-orange-100 bg-white px-3 text-[11px] font-medium text-stone-600"
+                    >
+                      切换长辈
+                    </button>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setUserMode("elder")}
+                  className="min-h-12 shrink-0 rounded-full bg-orange-50 px-4 py-2 text-xs text-stone-600"
+                >
+                  长辈端
+                </button>
+              </div>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
+              <div className="space-y-3">
+                <div
+                  className={`sticky top-0 z-10 -mx-1 rounded-[18px] border border-orange-100 bg-[#FFF1C7]/95 px-4 shadow-sm backdrop-blur ${
+                    isSummaryExpanded ? "py-3" : "py-2"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-orange-500">今日跟进</p>
+                    <button
+                      type="button"
+                      onClick={() => setIsSummaryExpanded((prev) => !prev)}
+                      className="min-h-8 rounded-full bg-white/80 px-3 text-[11px] font-medium text-stone-600"
+                    >
+                      {isSummaryExpanded ? "收起" : "展开"}
+                    </button>
+                  </div>
+                  {isSummaryExpanded && <p className="mt-1 text-sm leading-6 text-stone-700">{currentSummary}</p>}
+                </div>
+                {messages.map((message) => (
+                  <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
+                    <div
+                      className={`max-w-[88%] rounded-[20px] px-4 py-3 text-[15px] leading-7 shadow-sm ${
+                        message.role === "user"
+                          ? "bg-[#F2996E] text-white shadow-[0_10px_24px_rgba(242,153,110,0.22)]"
+                          : "border border-orange-100 bg-[#FFFDFB] text-stone-700"
+                      }`}
+                    >
+                      <p>{message.content}</p>
+                      {message.kind === "taskDraft" && message.drafts && (
+                        <div className="mt-3 space-y-3">
+                          {message.drafts.map((draft) => (
+                            <div key={draft.id} className="rounded-2xl border border-orange-100 bg-white p-4">
+                              <div className="flex items-center justify-between gap-3">
+                                <p className="font-semibold">{draft.title}</p>
+                                <span className="rounded-full bg-orange-50 px-3 py-1 text-xs text-orange-600">
+                                  {draft.priority}
+                                </span>
+                              </div>
+                              <div className="mt-3 grid gap-2 text-sm text-stone-600">
+                                <p>长辈：{draft.elderDisplayName}</p>
+                                <p>提醒时间：{draft.remindLabel}</p>
+                                <p>触达方式：{draft.channel}</p>
+                                <p>需要确认：{draft.needConfirmation ? "是" : "否"}</p>
+                                <p>需要结果：{draft.needResult ? "是" : "否"}</p>
+                              </div>
+                              <div className="mt-4 flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  disabled={draft.created}
+                                  onClick={() => createTaskFromDraft(draft)}
+                                  className={`min-h-12 rounded-full px-4 py-2 text-xs font-medium ${draft.created ? "bg-stone-100 text-stone-400" : "bg-[#F2996E] text-white"}`}
+                                >
+                                  {draft.created ? "已创建" : "确认创建"}
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {message.kind === "note" && message.noteVersions && (
+                        <div className="mt-3 space-y-3">
+                          {message.noteVersions.map((version) => (
+                            <div key={version.style} className="rounded-2xl bg-[#FFF1C7] p-4">
+                              <p className="text-xs text-stone-500">{version.style}</p>
+                              <p className="mt-2 text-sm text-stone-700">{version.text}</p>
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => sendNote(version)}
+                                  className="min-h-12 rounded-full bg-white px-3 py-2 text-xs text-stone-700"
+                                >
+                                  发送给{currentElder?.displayName ?? "长辈"}
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {message.role === "assistant" && message.kind === "text" && message.id === messages[0]?.id && (
+                        <div className="mt-3 space-y-2">
+                          <p className="text-[12px] leading-5 text-stone-400">你也可以这样说</p>
+                          <div className="flex flex-wrap gap-2">
+                            {QUICK_INPUTS.map((sample) => (
+                              <button
+                                key={sample}
+                                type="button"
+                                onClick={() => setInput(sample)}
+                                className="rounded-full bg-transparent px-0 text-left text-[12px] leading-5 text-stone-500"
+                              >
+                                {sample}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {isSubmitting && (
+                  <div className="flex justify-start">
+                    <div className="max-w-[88%] rounded-[20px] border border-orange-100 bg-[#FFFDFB] px-4 py-3 text-[15px] leading-7 text-stone-700">
+                      正在帮你想一想...
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="border-t border-orange-100 bg-[linear-gradient(180deg,#FFFDF9_0%,#FFF5EA_100%)] px-3 pb-1 pt-3">
+              <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
+                {["发提醒", "写小纸条", "查状态", "电话触达"].map((label) => (
+                  <span key={label} className="shrink-0 rounded-full border border-orange-100/60 bg-white px-3 py-1.5 text-[11px] text-stone-500">
+                    {label}
+                  </span>
+                ))}
+              </div>
+              <div className="flex items-end gap-2">
+                <textarea
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  placeholder="突然想起什么，就告诉我..."
+                  className="min-h-12 flex-1 resize-none rounded-[24px] border border-orange-100 bg-[#FFFDFB] px-4 py-3 text-[15px] text-stone-700 outline-none"
+                />
+                <button
+                  type="button"
+                  disabled={isSubmitting}
+                  onClick={() => handleAgentSubmit()}
+                  className={`min-h-12 shrink-0 rounded-full px-5 py-2 text-sm font-medium text-white ${isSubmitting ? "bg-orange-200" : "bg-[#F2996E]"}`}
+                >
+                  {isSubmitting ? "思考中" : "发送"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "tasks" && (
+          <div className="grid gap-4 xl:grid-cols-[1fr_0.95fr]">
+            <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-semibold">任务列表</h2>
+                  <p className="text-sm text-stone-500">明确区分已触达、已确认和已完成</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={triggerSchedulerTick}
+                  className="min-h-10 rounded-full bg-violet-100 px-4 py-2 text-xs font-medium text-violet-700"
+                >
+                  ⚡ 调度器 Tick
+                </button>
+              </div>
+              {schedulerResult && (
+                <div className="mb-3 rounded-2xl border border-violet-200 bg-violet-50 p-3 text-xs text-violet-800 whitespace-pre-wrap">
+                  {schedulerResult}
+                </div>
+              )}
+              <div className="space-y-3">
+                {sortedTasks.map((task) => (
+                  <button
+                    key={task.id}
+                    type="button"
+                    onClick={() => setSelectedTaskId(task.id)}
+                    className={`min-h-24 w-full rounded-[24px] border p-4 text-left ${selectedTaskId === task.id ? "border-orange-300 bg-orange-50/60" : "border-stone-100 bg-stone-50/40"}`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="font-semibold">{task.title}</p>
+                        <p className="mt-1 text-sm text-stone-500">
+                          {task.elderDisplayName}｜{task.remindLabel}｜{task.channel}
+                        </p>
+                      </div>
+                      <StatusBadge status={task.status} />
+                    </div>
+                    <p className="mt-3 text-sm text-stone-600">{task.content}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
+              {selectedTask ? (
+                <>
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm text-stone-500">任务详情</p>
+                      <h2 className="text-lg font-semibold">{selectedTask.title}</h2>
+                    </div>
+                    <StatusBadge status={selectedTask.status} />
+                  </div>
+
+                  <div className="mt-4 grid gap-3 rounded-[24px] bg-orange-50/60 p-4 text-sm text-stone-700">
+                    <p>长辈：{selectedTask.elderDisplayName}</p>
+                    <p>时间：{selectedTask.remindLabel}</p>
+                    <p>触达方式：{selectedTask.channel}</p>
+                    <p>回执要求：{selectedTask.needResult ? "需要结果" : "确认收到即可"}</p>
+                    <p>最近回复：{selectedTask.result ?? "还没有明确回复"}</p>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openCall(selectedTask, "child")}
+                      className="min-h-12 rounded-full bg-[#FFF1C7] px-4 py-2 text-xs text-stone-700"
+                    >
+                      电话提醒
+                    </button>
+                    <button
+                      type="button"
+                      onClick={startAgentCall}
+                      className="min-h-12 rounded-full bg-[#F2996E] px-4 py-2 text-xs font-medium text-white"
+                    >
+                      🤖 模拟 Agent 电话
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applyTaskStatus(selectedTask, "reached")}
+                      className="min-h-12 rounded-full bg-sky-100 px-4 py-2 text-xs text-sky-700"
+                    >
+                      模拟电话触达
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => applyTaskStatus(selectedTask, "confirmed")}
+                      className="min-h-12 rounded-full bg-emerald-100 px-4 py-2 text-xs text-emerald-700"
+                    >
+                      模拟说知道了
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        applyTaskStatus(
+                          selectedTask,
+                          "completed",
+                          selectedTask.needResult ? "血糖 6.1" : "已经做完了",
+                        )
+                      }
+                      className="min-h-12 rounded-full bg-emerald-500 px-4 py-2 text-xs text-white"
+                    >
+                      模拟完成
+                    </button>
+                  </div>
+
+                  <div className="mt-5">
+                    <h3 className="text-sm font-semibold text-stone-700">执行记录</h3>
+                    <div className="mt-3 space-y-3">
+                      {[...selectedTask.logs].reverse().map((log) => (
+                        <div key={log.id} className="rounded-2xl border border-stone-100 bg-stone-50/70 p-3 text-sm text-stone-600">
+                          <p>{log.event}</p>
+                          <p className="mt-1 text-xs text-stone-400">{log.time}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="flex min-h-[280px] items-center justify-center text-sm text-stone-500">
+                  选中一条任务，就能查看完整回执链路。
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "notifications" && (
+          <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
+            <h2 className="text-lg font-semibold">通知中心</h2>
+            <p className="mt-1 text-sm text-stone-500">集中展示回执、未回应提醒和今日摘要</p>
+            <div className="mt-4 space-y-3">
+              {notifications.map((notice) => (
+                <div key={notice.id} className={`rounded-[24px] p-4 ${getNoticeClass(notice.level)}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-semibold">{notice.title}</p>
+                      <p className="mt-1 text-sm">{notice.detail}</p>
+                    </div>
+                    <span className="text-xs opacity-70">{notice.time}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "profile" && (
+          <div className="space-y-4">
+            <div className="grid gap-4 xl:grid-cols-[1fr_0.9fr]">
+              <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
+                <h2 className="text-lg font-semibold">长辈档案</h2>
+                <div className="mt-4 space-y-3">
+                  {currentElder ? (
+                    <div className="rounded-[24px] bg-orange-50/70 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-xl font-semibold">{currentElder.displayName}</p>
+                          <p className="mt-2 text-sm text-stone-600">关系：{currentElder.relation}</p>
+                          <p className="mt-1 text-sm text-stone-600">电话：{currentElder.phone}</p>
+                          <p className="mt-1 text-sm text-stone-600">方便时间：{currentElder.availableTime}</p>
+                          <p className="mt-1 text-sm text-stone-600">回应习惯：{currentElder.responseHabit || "待补充"}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => beginEditElder(currentElder)}
+                          className="min-h-10 rounded-full bg-white px-4 text-xs font-medium text-stone-700"
+                        >
+                          编辑
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="rounded-[24px] border border-orange-100 bg-white p-3">
+                    <p className="text-sm font-medium text-stone-700">全部长辈</p>
+                    <div className="mt-3 space-y-2">
+                      {elders.map((elder) => {
+                        const active = elder.id === currentElderId;
+                        return (
+                          <div
+                            key={elder.id}
+                            className={`flex items-center justify-between gap-3 rounded-2xl border px-4 py-3 ${
+                              active ? "border-orange-200 bg-orange-50/60" : "border-stone-100 bg-stone-50/40"
+                            }`}
+                          >
+                            <button
+                              type="button"
+                              onClick={() => setCurrentElderId(elder.id)}
+                              className="min-h-10 flex-1 text-left"
+                            >
+                              <p className="font-medium text-stone-800">{elder.displayName}</p>
+                              <p className="mt-1 text-xs text-stone-500">{elder.relation} · {elder.phone}</p>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => beginEditElder(elder)}
+                              className="min-h-10 rounded-full border border-orange-100 bg-white px-4 text-xs font-medium text-stone-700"
+                            >
+                              编辑
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-lg font-semibold">{editingElderId ? "编辑长辈" : "添加一位长辈"}</h2>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowAddElder((prev) => {
+                        const next = !prev;
+                        if (next) {
+                          if (!editingElderId) resetForm();
+                        } else {
+                          setEditingElderId(null);
+                          resetForm();
+                        }
+                        return next;
+                      });
+                    }}
+                    className="min-h-12 rounded-full bg-orange-50 px-4 py-2 text-xs text-orange-600"
+                  >
+                    {showAddElder ? "收起" : editingElderId ? "继续编辑" : "展开"}
+                  </button>
+                </div>
+
+                {showAddElder ? (
+                  <div className="mt-4 space-y-3">
+                    <select
+                      value={elderForm.relation}
+                      onChange={(event) => setElderForm((prev) => ({ ...prev, relation: event.target.value }))}
+                      className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+                    >
+                      {RELATION_OPTIONS.map((option) => (
+                        <option key={option}>{option}</option>
+                      ))}
+                    </select>
+                    <input
+                      value={elderForm.displayName}
+                      onChange={(event) => setElderForm((prev) => ({ ...prev, displayName: event.target.value }))}
+                      placeholder="显示称呼"
+                      className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+                    />
+                    <input
+                      value={elderForm.phone}
+                      onChange={(event) => setElderForm((prev) => ({ ...prev, phone: event.target.value }))}
+                      placeholder="手机号"
+                      className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+                    />
+                    <input
+                      value={elderForm.availableTime}
+                      onChange={(event) => setElderForm((prev) => ({ ...prev, availableTime: event.target.value }))}
+                      placeholder="方便接电话时间"
+                      className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+                    />
+                    <textarea
+                      value={elderForm.responseHabit}
+                      onChange={(event) => setElderForm((prev) => ({ ...prev, responseHabit: event.target.value }))}
+                      placeholder="响应习惯，比如：上午容易接电话，晚上不怎么看手机"
+                      className="min-h-24 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={createElder}
+                      className="min-h-12 w-full rounded-2xl bg-[#F2996E] px-4 py-3 text-sm font-medium text-white"
+                    >
+                      {editingElderId ? "保存修改" : "保存长辈档案"}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="mt-4 rounded-[24px] bg-orange-50/70 p-4 text-sm leading-6 text-stone-600">
+                    支持多位长辈独立维护画像、任务和回执。你也可以直接在聊天里说“我想加一下外公”。
+                  </div>
+                )}
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {activeTab === "assistant" && (
+          <div className="grid gap-4 xl:grid-cols-[1fr_0.95fr]">
+            <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-lg font-semibold">编辑小助理性格</h2>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("home")}
+                  className="min-h-12 rounded-full bg-orange-50 px-4 py-2 text-xs text-stone-700"
+                >
+                  返回小助理
+                </button>
+              </div>
+              <p className="mt-1 text-sm text-stone-500">决定 TA 做电话提醒、发提醒和转述小纸条时的感觉。</p>
+
+              <div className="mt-4 space-y-4">
+                <div>
+                  <p className="mb-2 text-sm font-medium text-stone-700">语气</p>
+                  <div className="flex flex-wrap gap-2">
+                    {["温柔陪伴", "亲切直接", "像晚辈一样", "稳重安心"].map((item) => (
+                      <button
+                        key={item}
+                        type="button"
+                        onClick={() => setAssistantProfile((prev) => ({ ...prev, tone: item }))}
+                        className={`min-h-12 rounded-full px-3 py-2 text-sm ${assistantProfile.tone === item ? "bg-[#F2996E] text-white" : "bg-orange-50 text-stone-600"}`}
+                      >
+                        {item}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <p className="mb-2 text-sm font-medium text-stone-700">表达节奏</p>
+                  <div className="flex flex-wrap gap-2">
+                    {["简短清楚", "慢一点", "多提醒一句", "先寒暄再提醒"].map((item) => (
+                      <button
+                        key={item}
+                        type="button"
+                        onClick={() => setAssistantProfile((prev) => ({ ...prev, rhythm: item }))}
+                        className={`min-h-12 rounded-full px-3 py-2 text-sm ${assistantProfile.rhythm === item ? "bg-[#F2996E] text-white" : "bg-orange-50 text-stone-600"}`}
+                      >
+                        {item}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <p className="mb-2 text-sm font-medium text-stone-700">主动程度</p>
+                  <div className="flex flex-wrap gap-2">
+                    {["适度主动", "少打扰", "多确认一次", "需要时再追问"].map((item) => (
+                      <button
+                        key={item}
+                        type="button"
+                        onClick={() => setAssistantProfile((prev) => ({ ...prev, initiative: item }))}
+                        className={`min-h-12 rounded-full px-3 py-2 text-sm ${assistantProfile.initiative === item ? "bg-[#F2996E] text-white" : "bg-orange-50 text-stone-600"}`}
+                      >
+                        {item}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <p className="mb-2 text-sm font-medium text-stone-700">一句印象</p>
+                  <input
+                    value={assistantProfile.signature}
+                    onChange={(event) => setAssistantProfile((prev) => ({ ...prev, signature: event.target.value }))}
+                    className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
+              <h2 className="text-lg font-semibold">预览效果</h2>
+              <div className="mt-4 rounded-[24px] bg-[#FFF1C7] p-4">
+                <p className="text-sm font-medium text-orange-600">给长辈的开场白</p>
+                <p className="mt-2 text-sm leading-7 text-stone-700">
+                  {buildAssistantPreview(assistantProfile, currentElder?.displayName ?? "妈妈")}
+                </p>
+              </div>
+
+              <div className="mt-4 rounded-[24px] border border-orange-100 bg-orange-50/50 p-4">
+                <p className="text-sm font-medium text-stone-700">电话提醒时会这样说</p>
+                <p className="mt-2 text-sm leading-7 text-stone-700">
+                  {buildCallScript(selectedTask ?? latestElderTask, currentElder)}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => openCall(selectedTask ?? latestElderTask, "child")}
+                className="mt-4 min-h-12 w-full rounded-2xl bg-[#F2996E] px-4 py-3 text-sm font-medium text-white"
+              >
+                用这个性格试打一个电话
+              </button>
+            </div>
+          </div>
+        )}
+      </section>
+
+      <div className="fixed inset-x-0 bottom-0 z-30 mx-auto max-w-5xl px-3 pb-[calc(4px+env(safe-area-inset-bottom))] pt-0 sm:px-4">
+        <div className="grid grid-cols-3 gap-2 rounded-[26px] border border-orange-100 bg-white/95 p-2 shadow-[0_18px_40px_rgba(242,153,110,0.18)] backdrop-blur">
+          {TABS.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setActiveTab(tab.key)}
+              className={`rounded-[18px] px-2 text-xs font-medium ${
+                (activeTab === tab.key ||
+                  (activeTab === "assistant" && tab.key === "home") ||
+                  (activeTab === "notifications" && tab.key === lastPrimaryTab)) ||
+                (activeTab === "notifications" && lastPrimaryTab === tab.key)
+                  ? tab.key === "home"
+                    ? "min-h-12 bg-[#F2996E] text-white"
+                    : "min-h-12 bg-orange-50 text-stone-800"
+                  : tab.key === "home"
+                    ? "min-h-12 bg-orange-50 text-stone-700"
+                    : "min-h-12 bg-transparent text-stone-500"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </main>
+  );
+}
