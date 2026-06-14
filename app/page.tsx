@@ -801,6 +801,25 @@ function buildExecutionLog(event: string): TaskLog {
   return { id: uid("log"), time: nowLabel(), event };
 }
 
+// ── 跨设备/跨标签页状态合并：数组 by ID 取较新版本 ──────────────────
+function mergeById<T extends { id: string }>(local: T[], remote: T[]): T[] {
+  const map = new Map<string, T>();
+  for (const item of local) map.set(item.id, item);
+  for (const item of remote) {
+    const existing = map.get(item.id);
+    if (!existing) {
+      map.set(item.id, item);
+    } else {
+      const getTs = (x: T): string => {
+        const r = x as unknown as Record<string, unknown>;
+        return String(r.updatedAt ?? r.createdAt ?? r.time ?? "");
+      };
+      if (getTs(item) >= getTs(existing)) map.set(item.id, item);
+    }
+  }
+  return Array.from(map.values());
+}
+
 function buildDemoState(): StoredState {
   const elders: Elder[] = [
     {
@@ -1098,6 +1117,10 @@ function StatusBadge({ status }: { status: TaskStatus }) {
 
 export default function HomePage() {
   const [hydrated, setHydrated] = useState(false);
+  // ── 跨设备/跨标签页同步控制 ──────────────────────────────────
+  const isSyncUpdate = useRef(false);
+  const lastRemoteTimestamp = useRef(0);
+  const pushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [userMode, setUserMode] = useState<UserMode | null>(null);
   // 身份锁定：选过身份后下次进来不需要重选
   const [identity, setIdentity] = useState<Identity | null>(null);
@@ -1688,6 +1711,94 @@ export default function HomePage() {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
   }, [hydrated, userMode, elders, tasks, notifications, messages, elderMessages, currentElderId, assistantProfile, assistantMemories, memoryEntries, callInsights]);
 
+  // ── 跨设备同步：推送状态到服务端（防抖 2s）──────────────────────────
+  useEffect(() => {
+    if (!hydrated || !identity?.userId) return;
+    if (isSyncUpdate.current) return; // 跳过由远端同步触发的更新，避免循环
+
+    if (pushTimer.current) clearTimeout(pushTimer.current);
+    pushTimer.current = setTimeout(async () => {
+      try {
+        const snapshot: StoredState = {
+          userMode, elders, tasks, notifications, messages, elderMessages,
+          currentElderId, assistantProfile, assistantMemories, memoryEntries, callInsights,
+        };
+        const res = await fetch("/api/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: identity.userId, state: snapshot }),
+        });
+        const data = await res.json();
+        if (data.timestamp) lastRemoteTimestamp.current = data.timestamp;
+      } catch { /* 同步失败不阻断主流程 */ }
+    }, 2000);
+    return () => { if (pushTimer.current) clearTimeout(pushTimer.current); };
+  }, [hydrated, identity?.userId, userMode, elders, tasks, notifications, messages, elderMessages, currentElderId, assistantProfile, assistantMemories, memoryEntries, callInsights]);
+
+  // ── 跨设备同步：拉取远端状态（轮询 5s + 页面可见时 + storage 事件）──
+  useEffect(() => {
+    if (!hydrated || !identity?.userId) return;
+
+    const applyRemoteState = (remote: StoredState) => {
+      isSyncUpdate.current = true;
+      setTasks(prev => mergeById(prev, remote.tasks ?? []));
+      setNotifications(prev => mergeById(prev, remote.notifications ?? []));
+      setMessages(prev => mergeById(prev, remote.messages ?? []));
+      setElderMessages(prev => mergeById(prev, remote.elderMessages ?? []));
+      setMemoryEntries(prev => mergeById(prev, remote.memoryEntries ?? []));
+      setCallInsights(prev => mergeById(prev, remote.callInsights ?? []));
+      // elders 合并（无 updatedAt，remote 版本覆盖同名）
+      setElders(prev => {
+        const map = new Map(prev.map(e => [e.id, e]));
+        for (const e of (remote.elders ?? [])) map.set(e.id, e);
+        return Array.from(map.values());
+      });
+      // assistantMemories 合并（by dayKey + updatedAt）
+      setAssistantMemories(prev => {
+        const map = new Map(prev.map(m => [m.dayKey, m]));
+        for (const m of (remote.assistantMemories ?? [])) {
+          const ex = map.get(m.dayKey);
+          if (!ex || m.updatedAt >= ex.updatedAt) map.set(m.dayKey, m);
+        }
+        return Array.from(map.values());
+      });
+      setTimeout(() => { isSyncUpdate.current = false; }, 200);
+    };
+
+    const pullFromServer = async () => {
+      try {
+        const res = await fetch(`/api/sync?userId=${encodeURIComponent(identity!.userId!)}`);
+        const data = await res.json();
+        if (data.state && data.timestamp > lastRemoteTimestamp.current) {
+          lastRemoteTimestamp.current = data.timestamp;
+          applyRemoteState(data.state as StoredState);
+        }
+      } catch { /* 拉取失败不阻断 */ }
+    };
+
+    // 定期轮询
+    const interval = setInterval(pullFromServer, 5000);
+    // 页面变为可见时立即拉取
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") pullFromServer();
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    // 跨标签页 storage 事件（同浏览器即时同步）
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key !== STORAGE_KEY || !e.newValue) return;
+      try {
+        applyRemoteState(JSON.parse(e.newValue) as StoredState);
+      } catch { /* 解析失败忽略 */ }
+    };
+    window.addEventListener("storage", handleStorage);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, [hydrated, identity?.userId]);
+
   const currentElder = useMemo(
     () => elders.find((elder) => elder.id === currentElderId) ?? null,
     [elders, currentElderId],
@@ -2114,6 +2225,40 @@ export default function HomePage() {
       kind: "text",
       content: `帮你排好啦~到了${draft.remindLabel}，我会先联系${draft.elderDisplayName}的。${draft.relayMessage ? `你说的那句"${draft.relayMessage}"，我也帮你转告给TA呀~` : "你放心交给我吧~"}`,
     });
+
+    // ── 检查长辈是否已注册绑定ID，未绑定时提醒无法触达 ──────────────
+    const targetElder = elders.find(e => e.id === draft.elderId);
+    if (targetElder?.phone) {
+      const registry = loadUsersRegistry();
+      const elderAccount = Object.values(registry).find(
+        acc => acc.phone === targetElder.phone && acc.role === "elder",
+      );
+      if (!elderAccount) {
+        addNotification({
+          title: `${draft.elderDisplayName}尚未绑定ID`,
+          detail: `${draft.elderDisplayName}还没有注册账号，到了时间可能无法通过电话触达。建议你亲自提醒一下哦。`,
+          level: "warning",
+        });
+        appendAssistantMessage({
+          id: uid("msg"),
+          role: "assistant",
+          kind: "text",
+          content: `对了，提醒你一下~${draft.elderDisplayName}好像还没有在系统里注册绑定ID呢。到了提醒时间，我可能没办法自动打电话联系TA。要是有TA的联系方式，你亲自提醒一下会更稳妥哦。等TA注册绑定好了，我就能帮你自动触达啦~`,
+        });
+      } else if (identity?.userId && elderAccount.boundPartnerId !== identity.userId) {
+        addNotification({
+          title: `${draft.elderDisplayName}尚未与你绑定`,
+          detail: `${draft.elderDisplayName}已注册但还没和你完成绑定，任务暂时无法自动触达。`,
+          level: "warning",
+        });
+        appendAssistantMessage({
+          id: uid("msg"),
+          role: "assistant",
+          kind: "text",
+          content: `小提示~${draft.elderDisplayName}注册过了，但好像还没跟你绑定呢。你可以在「我的」页面发起绑定请求，等TA通过后我就能帮你自动联系啦~`,
+        });
+      }
+    }
   }
 
   function updateTask(taskId: string, updater: (task: Task) => Task) {
