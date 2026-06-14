@@ -445,25 +445,36 @@ function buildStageInstruction(
 - 不要输出任何额外字段（不要 stage / intent / analysis 等）
 - \`reply\` 必须是纯中文对话文本，不要加引号以外的说明`;
 
-  // 核心风格规则：禁用「您/您呀」「喂」「我是您的小宝贝」三类语气，改用亲昵称呼
+  // 核心风格规则 + 对话规则
   const base = `## 称谓规则（极其重要！必须严格遵守！）
 - 你是${callName}家里设置的小助理念念，跟${callName}是亲昵的晚辈关系
-- 直接叫${callName}亲昵称呼（如“妈”“奶奶”“姥姥”“阿姨”等）或直接叫名字“${callName}”，不要加“呀”后缀
+- 直接叫${callName}亲昵称呼（如"妈""奶奶""姥姥""阿姨"等）或直接叫名字"${callName}"，不要加"呀"后缀
 - 严禁使用「您」「您呀」——这是硬约束，违反就违规
 - 严禁以「喂」开头或使用「喂」
 - 严禁自称「我是您的小宝贝」「我是您的小棉袄」等暧昧/低龄化称呼——你是小助理
-- 对话风格：活泼温暖的晚辈妹妹，多用语气词（呢、嘛、啦、哈喽、~），每次只说一两句话`;
+- 对话风格：活泼温暖的晚辈妹妹，多用语气词（呢、嘛、啦、哈喽、~），每次只说一两句话
 
+## 对话规则（极其重要！必须严格遵守！）
+- 你的回复必须回应${callName}刚才说的具体内容，体现"我在认真听"
+- 如果${callName}提到了某个话题（天气、身体、家人、情绪、日常），你的回复必须跟这个话题有关
+- 严禁使用固定模板回复（如"嗯嗯我听着呢""好的我记下了""你继续说"），必须根据${callName}的原话生成有个性的回复`;
+
+  // 长辈最近说的话（所有阶段统一注入，确保 LLM 能看到并回应）
+  const trimmedInput = elderInput?.trim();
+  const elderInputCtx = trimmedInput
+    ? `\n\n## ${callName}刚才说的话\n"${trimmedInput}"\n↑ 你的回复必须跟这句话的具体内容有关，不要无视。`
+    : "";
+  
   const instructions: Record<CallStage, string> = {
-    greeting: `${base}\n\n当前任务：自我介绍 + 问${callName}是否方便。\n生成一两句话。`,
-    warm_chat: `${base}\n\n当前任务：关心一句家常（身体/心情/日常）。不提任务。\n生成一两句话。`,
-    task_reminder: `${base}\n\n当前任务：自然地提到提醒事项："${reformulatedTask}"。\n要具体问（如"药吃了吗""血糖测了吗"）。\n禁止说"我记下来了"。\n生成一两句话。`,
-    task_followup: `${base}\n\n当前任务：${callName}刚才说了"${elderInput}"，根据这个反馈温和地追问或确认。\n如长辈说"等会儿吃"→"好的呀，吃完跟${caregiverName}说一声哦"。\n生成一两句话。`,
-    relay: `${base}\n\n当前任务：问${callName}有没有话想带给${caregiverName}。\n生成一两句话。`,
-    escalation: `${base}\n\n当前任务：${callName}刚才说身体不舒服（"${elderInput ?? ""}"）。\n请温和地表达关心，建议联系家人或就医，然后结束通话。\n如“哎呀，${callName}先坐着休息一下，我这就帮${callName}告诉${caregiverName}，让她来看看${callName}哦~”。\n语气要关切，不要慌张。`,
-    // closing: 只在长辈明确表达要结束时才进本阶段，避免“好的/方便”被误推后念念出“不打扰您”
-    closing: `${base}\n\n当前任务：温暖收尾。\n仅在${callName}明确表达要结束通话（如“再见”“挂了”“没事了”“行了”）后才进本阶段。\n不要说“那我先不打扰您啦”，用开放式收尾。\n如“那${callName}好好休息，我跟${caregiverName}说一声${callName}一切都好~”`,
-    ended: `${base}\n\n通话已结束。`,
+    greeting: `${base}${elderInputCtx}\n\n当前任务：自我介绍 + 问${callName}是否方便。\n生成一两句话。`,
+    warm_chat: `${base}${elderInputCtx}\n\n当前任务：关心一句家常（身体/心情/日常）。不提任务。${trimmedInput ? `\n请根据${callName}刚才说的"${trimmedInput}"，自然地接话或追问，不要无视${callName}说的话。` : ""}\n生成一两句话。`,
+    task_reminder: `${base}${elderInputCtx}\n\n当前任务：自然地提到提醒事项："${reformulatedTask}"。\n要具体问（如"药吃了吗""血糖测了吗"）。\n禁止说"我记下来了"。${trimmedInput ? `\n${callName}刚才说了"${trimmedInput}"，请先回应这句话，再自然地转到提醒事项。` : ""}\n生成一两句话。`,
+    task_followup: `${base}${elderInputCtx}\n\n当前任务：${callName}刚才说了"${elderInput ?? ""}"，根据这个反馈温和地追问或确认。\n如长辈说"等会儿吃"→"好的呀，吃完跟${caregiverName}说一声哦"。\n生成一两句话。`,
+    relay: `${base}${elderInputCtx}\n\n当前任务：问${callName}有没有话想带给${caregiverName}。${trimmedInput ? `\n请先回应${callName}刚才说的"${trimmedInput}"，再自然地问有没有话带给${caregiverName}。` : ""}\n生成一两句话。`,
+    escalation: `${base}${elderInputCtx}\n\n当前任务：${callName}刚才说身体不舒服（"${elderInput ?? ""}"）。\n请温和地表达关心，建议联系家人或就医，然后结束通话。\n如"哎呀，${callName}先坐着休息一下，我这就帮${callName}告诉${caregiverName}，让她来看看${callName}哦~"。\n语气要关切，不要慌张。`,
+    // closing: 只在长辈明确表达要结束时才进本阶段，避免"好的/方便"被误推后念念出"不打扰您"
+    closing: `${base}${elderInputCtx}\n\n当前任务：温暖收尾。\n仅在${callName}明确表达要结束通话（如"再见""挂了""没事了""行了"）后才进本阶段。\n不要说"那我先不打扰您啦"，用开放式收尾。\n如"那${callName}好好休息，我跟${caregiverName}说一声${callName}一切都好~"`,
+    ended: `${base}${elderInputCtx}\n\n通话已结束。`,
   };
 
   return (instructions[stage] ?? instructions.closing) + JSON_FORMAT_SUFFIX;
@@ -510,11 +521,12 @@ function sanitizeHonorifics(
 // ── LLM 输出容错解析 ─────────────────────────────────────────────────────────
 
 /**
- * 从 LLM 输出文本中解析 reply 字段。四层兜底：
+ * 从 LLM 输出文本中解析 reply 字段。五层兑底：
  * 1. 剥离 ```json ... ``` markdown 包裹
  * 2. 直接 JSON.parse（DeepSeek jsonMode 严格遵守时）
  * 3. regex 提取 "reply" : "..."（双引号）
  * 4. regex 提取 'reply' : '...'（单引号变体）
+ * 5. 截断 JSON 兜底：提取 "reply": " 后到结尾的所有内容
  * 全部失败返回空字符串（调用方走 getFallbackResponse）
  */
 function parseReplyFromLLM(rawText: string): string {
@@ -538,16 +550,34 @@ function parseReplyFromLLM(rawText: string): string {
     // fallthrough to regex
   }
 
-  // 3. 双引号 regex 兜底："reply" : "..."（用 [\s\S] 代替 /s 以兼容 ES2018 以下）
+  // 3. 双引号 regex 兑底："reply" : "..."（用 [\s\S] 代替 /s 以兼容 ES2018 以下）
   const replyMatch = cleaned.match(/"reply"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   if (replyMatch) {
     return replyMatch[1].replace(/\\"/g, '"').replace(/\\n/g, "\n").trim();
   }
 
-  // 4. 单引号变体兜底：'reply' : '...'
+  // 4. 单引号变体兑底：'reply' : '...'
   const singleQuoteMatch = cleaned.match(/'reply'\s*:\s*'((?:[^'\\]|\\.)*)'/);
   if (singleQuoteMatch) {
     return singleQuoteMatch[1].replace(/\\'/g, "'").replace(/\\n/g, "\n").trim();
+  }
+
+  // 5. 截断 JSON 兑底：DeepSeek 偶尔返回截断的 JSON 如 {"reply": "妈妈怎么啦？是不是我哪里
+  // 提取 "reply": " 后到结尾的所有内容
+  const truncatedMatch = cleaned.match(/"reply"\s*:\s*"(.+)$/);
+  if (truncatedMatch) {
+    const text = truncatedMatch[1]
+      .replace(/\\"/g, '"')
+      .replace(/\\n/g, "\n")
+      .replace(/["}\s]+$/, "") // 去掉结尾可能的 "、}、空白
+      .trim();
+    if (text.length > 0) {
+      console.warn("[parseReplyFromLLM] 使用截断 JSON 兑底提取", {
+        extractedLength: text.length,
+        extractedPreview: text.slice(0, 80),
+      });
+      return text;
+    }
   }
 
   // 全部解析失败 → 返回空字符串（调用方走 getFallbackResponse）
@@ -732,17 +762,40 @@ export async function POST(request: Request) {
 
 // ── Start handler ───────────────────────────────────────────────────────
 
+// ── 前端 mock ID → 服务端 store ID 别名映射 ────────────────────────────
+// 前端 page.tsx 使用 elder_mom / elder_dad / user_xiaoyu
+// 服务端 store 使用 elder_003 / elder_002 / user_001
+const ELDER_ID_ALIASES: Record<string, string> = {
+  elder_mom: "elder_003",
+  elder_dad: "elder_002",
+  elder_grandma: "elder_001",
+};
+const CAREGIVER_ID_ALIASES: Record<string, string> = {
+  user_xiaoyu: "user_001",
+};
+
+function resolveElderId(id: string): string {
+  return ELDER_ID_ALIASES[id] ?? id;
+}
+function resolveCaregiverId(id: string): string {
+  return CAREGIVER_ID_ALIASES[id] ?? id;
+}
+
 async function handleStart(body: Record<string, unknown>) {
-  const { elderId, taskOccurrenceId, caregiverId, relayMessage } = body as {
+  const { elderId: rawElderId, taskOccurrenceId, caregiverId: rawCaregiverId, relayMessage } = body as {
     elderId?: string;
     taskOccurrenceId?: string;
     caregiverId?: string;
     relayMessage?: string;
   };
 
-  if (!elderId) {
+  if (!rawElderId) {
     return NextResponse.json({ error: "Missing elderId." }, { status: 400 });
   }
+
+  // 前端 mock ID → store ID 别名转换
+  const elderId = resolveElderId(rawElderId);
+  const caregiverId = rawCaregiverId ? resolveCaregiverId(rawCaregiverId) : undefined;
 
   // 服务端查库锁定 elder 上下文
   const elderRecord = store.getElder(elderId);
@@ -814,6 +867,7 @@ async function handleStart(body: Record<string, unknown>) {
 
   // LLM 生成开场白
   let reply = "";
+  let llmUsed = false;
   try {
     const instruction = buildStageInstruction("greeting", session);
     const messages: ChatMessage[] = [
@@ -821,9 +875,14 @@ async function handleStart(body: Record<string, unknown>) {
       { role: "system", content: `现在电话刚刚接通。请开始第一轮对话。\n你要先自我介绍，然后问${elder.callName}是否方便聊几句。\n只说一两句话就够了，说完等回应。` },
     ];
 
-    const rawJson = await callLLMJson(messages, { temperature: 0.6, maxTokens: 200 });
+    const rawJson = await callLLMJson(messages, { temperature: 0.6, maxTokens: 1024 });
     reply = parseReplyFromLLM(rawJson);
-  } catch {
+    if (reply) llmUsed = true;
+  } catch (llmError) {
+    console.error("[elder-call-conversation][start] LLM 调用失败，使用兑底开场白", {
+      sessionId,
+      error: llmError instanceof Error ? llmError.message : String(llmError),
+    });
     reply = getFallbackGreeting(elder, caregiverName);
   }
 
@@ -846,6 +905,7 @@ async function handleStart(body: Record<string, unknown>) {
     reply,
     stage: "greeting",
     shouldEndCall: false,
+    llmUsed,
   });
 }
 
@@ -926,25 +986,34 @@ async function handleContinue(body: Record<string, unknown>) {
 
   // LLM 生成回复
   let reply = "";
+  let llmUsed = false;
   try {
     const instruction = buildStageInstruction(nextStage, session, input);
+
+    // 将对话历史拼入 system prompt（避免 user/assistant 消息混入导致 JSON 模式失效）
+    const recentHistory = session.history.slice(-10);
+    const historyText = recentHistory.length > 0
+      ? `\n\n## 之前的对话\n${recentHistory.map(t =>
+          t.role === "elder" ? `${elder.callName}：${t.text}` : `念念：${t.text}`
+        ).join("\n")}`
+      : "";
+
     const messages: ChatMessage[] = [
-      { role: "system", content: instruction },
+      { role: "system", content: instruction + historyText },
     ];
 
-    // 添加最近 5 轮对话历史（精简上下文）
-    const recentHistory = session.history.slice(-10);
-    for (const turn of recentHistory) {
-      messages.push({
-        role: turn.role === "elder" ? "user" : "assistant",
-        content: turn.role === "elder" ? `${elder.callName}：${turn.text}` : turn.text,
-      });
-    }
-
-    const rawJson = await callLLMJson(messages, { temperature: 0.6, maxTokens: 200 });
+    const rawJson = await callLLMJson(messages, { temperature: 0.6, maxTokens: 1024 });
     reply = parseReplyFromLLM(rawJson);
-  } catch {
+    if (reply) llmUsed = true;
+  } catch (llmError) {
     // 兑底调用传完整上下文，避免「驴唇不对马嘴」
+    console.error("[elder-call-conversation][continue] LLM 调用失败，使用兑底回复", {
+      sessionId,
+      stage: nextStage,
+      intent: classified.intent,
+      elderInput: input,
+      error: llmError instanceof Error ? llmError.message : String(llmError),
+    });
     reply = getFallbackResponse(session, classified, nextStage, input);
   }
 
@@ -983,5 +1052,6 @@ async function handleContinue(body: Record<string, unknown>) {
     capturedTaskStatus,
     healthAlert: classified.healthAlert ?? false,
     relayMessage: session.relayMessage ?? null,
+    llmUsed,
   });
 }

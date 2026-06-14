@@ -60,21 +60,37 @@ export async function callLLM(
       }
 
       const data = (await response.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
+        choices?: Array<{ message?: { content?: string; reasoning_content?: string } }>;
       };
 
-      const content = data.choices?.[0]?.message?.content;
+      // deepseek-v4-flash 等模型自带 thinking 模式，content 可能因 token 不足而为空
+      // 优先读 content，兑底读 reasoning_content
+      const msg = data.choices?.[0]?.message;
+      const content = msg?.content;
       if (!content) {
+        // thinking 模式下如果 content 为空但 reasoning_content 有值，说明 token 被思考过程吃完了
+        if (msg?.reasoning_content) {
+          console.warn("[llm-provider] content 为空，但 reasoning_content 有值（token 可能被思考过程耗尽）", {
+            reasoningLength: msg.reasoning_content.length,
+          });
+        }
         throw new Error("DeepSeek returned empty content.");
       }
 
       return content;
     } catch (error) {
       if (attempt === 2) throw error;
-      if (
+      // 重试条件：5xx 服务器错误 或 空内容响应（DeepSeek 偶发问题）
+      const isServerError =
         error instanceof Error &&
-        error.message.startsWith("DeepSeek API error 5")
-      ) {
+        error.message.startsWith("DeepSeek API error 5");
+      const isEmptyContent =
+        error instanceof Error &&
+        error.message.includes("empty content");
+      if (isServerError || isEmptyContent) {
+        console.warn(`[llm-provider] 第 ${attempt + 1} 次调用失败，重试中...`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
         await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
         continue;
       }
