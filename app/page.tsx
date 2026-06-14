@@ -1482,6 +1482,14 @@ export default function HomePage() {
     saveUsersRegistry(registry);
     setMyAccount(account);
 
+    // 手机号是数据双向绑定的锚点：所有 elder / task / memory / call session 都可通过此 phone 定位
+    console.log("[identity] 手机号已记录为数据双向绑定锚点", {
+      phone,
+      userId,
+      role,
+      personId: role === "child" ? `user_${userId}` : `elder_${userId}`,
+    });
+
     // 同步 identity
     const personId = role === "child" ? `user_${userId}` : `elder_${userId}`;
     const next: Identity = { role, personId, phone, userId, displayName: name };
@@ -2312,6 +2320,7 @@ export default function HomePage() {
 
     try {
       // start 只传 ID，服务端查库锁定上下文
+      // phone 作为数据双向绑定的锚点，服务端可用于查找/创建 elder 记录
       const res = await fetch("/api/elder-call-conversation", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2320,6 +2329,7 @@ export default function HomePage() {
           elderId: callSession.elderId,
           taskOccurrenceId: callSession.taskId,  // 可选
           caregiverId: "user_xiaoyu",
+          phone: identity?.phone,  // 手机号：数据双向绑定的锚点
         }),
       });
 

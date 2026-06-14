@@ -23,6 +23,7 @@ type LockedElderContext = {
   personalityTraits: string[];
   recentSignals: string[];
   oneLinePortrait: string;
+  phone?: string;          // 手机号：数据双向绑定的锚点
 };
 
 type CallStage =
@@ -782,11 +783,12 @@ function resolveCaregiverId(id: string): string {
 }
 
 async function handleStart(body: Record<string, unknown>) {
-  const { elderId: rawElderId, taskOccurrenceId, caregiverId: rawCaregiverId, relayMessage } = body as {
+  const { elderId: rawElderId, taskOccurrenceId, caregiverId: rawCaregiverId, relayMessage, phone } = body as {
     elderId?: string;
     taskOccurrenceId?: string;
     caregiverId?: string;
     relayMessage?: string;
+    phone?: string;  // 手机号：数据双向绑定的锚点
   };
 
   if (!rawElderId) {
@@ -798,14 +800,28 @@ async function handleStart(body: Record<string, unknown>) {
   const caregiverId = rawCaregiverId ? resolveCaregiverId(rawCaregiverId) : undefined;
 
   // 服务端查库锁定 elder 上下文
+  // 查找顺序：1) elderId → 2) phone（双向绑定锚点）→ 3) 第一个可用 elder 兑底
   let elderRecord = store.getElder(elderId);
+  if (!elderRecord && phone) {
+    // 按 phone 查找：手机号是稳定的身份标识，与 userId/elderId 解耦
+    const allElders = store.getElders();
+    elderRecord = allElders.find((e) => e.phone === phone);
+    if (elderRecord) {
+      console.log("[elder-call-conversation][start] 通过 phone 锚点找到 elder", {
+        phone,
+        elderId: elderRecord.id,
+        requestedElderId: elderId,
+      });
+    }
+  }
   if (!elderRecord) {
-    // T0 修复：elderId 不在 store 中时（如前端动态生成的 elder_YD-XXXX），
+    // T0 修复：elderId 在 store 中找不到时（如前端动态生成的 elder_YD-XXXX），
     // 兑底使用 store 中第一个可用的 elder。Vercel 无状态环境下避免 404 导致整个通话失败。
     const fallback = store.getElders()[0];
     if (fallback) {
       console.warn("[elder-call-conversation][start] elderId 在 store 中找不到，兑底使用第一个 elder", {
         requestedElderId: elderId,
+        phone,
         fallbackElderId: fallback.id,
       });
       elderRecord = fallback;
@@ -827,6 +843,7 @@ async function handleStart(body: Record<string, unknown>) {
     personalityTraits: (elderRecord as Record<string, unknown>).personalityTraits as string[] ?? [],
     recentSignals: (elderRecord as Record<string, unknown>).recentSignals as string[] ?? [],
     oneLinePortrait: (elderRecord as Record<string, unknown>).oneLinePortrait as string ?? "",
+    phone: phone ?? elderRecord.phone,  // 优先用请求里的 phone（数据双向绑定锚点），兑底用 elder 记录里的
   };
 
   // 查库获取 task（如果传了 taskOccurrenceId）
