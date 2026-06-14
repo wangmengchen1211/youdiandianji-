@@ -79,6 +79,31 @@ policyConstraint(policy) → 生成 prompt 注入约束数组
 postCheck(output) → allow / sanitize / block
 ```
 
+### v2.1 通话链路重构（三步编排）
+
+v2.1 解决了状态机管太多的问题，核心理念：**LLM 提议，状态机校验**（而非状态机拍板，LLM 填空）。
+
+```
+长辈输入
+  ↓
+Step 1: UnderstandTurn（意图识别）
+  · 规则层预筛（否定词/情绪词检测）
+  · LLM 语义理解 → 9 种意图分类
+  · 修复：“方便”≠“不方便”（先检测否定词再判断）
+  ↓
+Step 2: DecideNextAction（LLM 提议 + 状态机校验）
+  · LLM 提议下一阶段 + 动作
+  · 状态机只做安全校验（硬上限/拒绝/身份锁定）
+  · 修复：listen_and_reflect 最多 1 轮（不再粘滞）
+  ↓
+Step 3: GenerateReply（自然话术生成）
+  · 禁止机械模板（“我记住了，我在听”）
+  · 先回应内容，再自然过渡
+  · 高温度（0.7）保证话术多样性
+```
+
+**完整日志系统**：每轮记录 9 字段（rawASR / normalizedText / stageBefore / intent / confidence / evidence / stageAfter / replySource / endReason），便于调试定位。
+
 ### v1 → v2 模块映射
 
 | v1 模块 | v2 替代 |
@@ -105,7 +130,7 @@ postCheck(output) → allow / sanitize / block
 | 样式 | Tailwind CSS 4 |
 | LLM | DeepSeek Chat API |
 | 结构化输出 | Zod 4 (Schema Validation) |
-| TTS 语音合成 | MiniMax / 火山引擎 / Azure（三选一，自动降级） |
+| TTS 语音合成 | MiniMax / 火山引擎 / Azure / edge-tts / 浏览器原生（五级降级） |
 | OCR | PaddleOCR（本地 Python 服务） |
 | 文档解析 | mammoth (Word) / pdf-parse (PDF) / sharp (图片) |
 | 部署 | Vercel |
@@ -153,31 +178,43 @@ postCheck(output) → allow / sanitize / block
 │       │   ├── prompts/          # v1 Prompt 模板
 │       │   ├── schemas/          # v1 Zod Schema
 │       │   └── evals/            # 评测用例
-│       ├── cognitive/            # v2 认知技能（8 个）
+│       ├── cognitive/            # v2 认知技能（8+3=11 个）
 │       │   ├── intent-situation-classifier.ts
 │       │   ├── deep-care-dialogue-engine.ts
 │       │   ├── task-blueprint-extractor.ts
 │       │   ├── call-plan-builder.ts
 │       │   ├── call-turn-engine.ts
+│       │   ├── turn-intent-classifier.ts   # v2.1 意图识别
+│       │   ├── action-decider.ts           # v2.1 LLM提议+状态机校验
+│       │   ├── reply-generator.ts          # v2.1 自然话术生成
 │       │   ├── post-call-extractor.ts
 │       │   ├── memory-insight-writer.ts
 │       │   └── hook-message-planner.ts
-│       ├── prompts/              # v2 Prompt 模板（8 个）
-│       ├── schemas/              # v2 Zod Schema（7 个）
+│       ├── prompts/              # v2 Prompt 模板（12 个，含 v2.1）
+│       │   ├── turn-intent-classifier.prompt.ts  # v2.1
+│       │   ├── action-proposal.prompt.ts         # v2.1
+│       │   ├── generate-reply.prompt.ts          # v2.1
+│       │   └── ...
+│       ├── schemas/              # v2 Zod Schema（9 个，含 v2.1）
+│       │   ├── turn-intent.schema.ts             # v2.1
+│       │   ├── action-decision.schema.ts         # v2.1
+│       │   └── ...
 │       ├── workflows/            # v2 工作流编排
 │       │   ├── chat.workflow.ts      # 子女端主入口
-│       │   ├── call.workflow.ts      # 通话链路
+│       │   ├── call.workflow.ts      # 通话链路（v2/v2.1 双模式）
+│       │   ├── turn-orchestrator.ts  # v2.1 三步编排总入口
 │       │   ├── post-call.workflow.ts # 通话后分析（幂等）
 │       │   ├── hook.workflow.ts      # 主动关怀
 │       │   ├── scheduler.workflow.ts # 调度器
-│       │   ├── feature-flag.ts       # 灰度开关
+│       │   ├── feature-flag.ts       # 灰度开关（v2 + v2.1）
 │       │   ├── response-adapter.ts   # v2→旧前端适配
 │       │   └── regression-cases.ts   # 回归测试样例
 │       ├── services/             # 领域服务
 │       │   ├── context.service.ts    # 上下文组装
 │       │   ├── safety.service.ts     # 三层安全
 │       │   ├── event-bus.service.ts  # 事件总线
-│       │   ├── call-session.service.ts # 通话会话管理
+│       │   ├── call-session.service.ts # 通话会话管理（含身份锁定）
+│       │   ├── turn-logger.service.ts   # v2.1 完整日志（9字段）
 │       │   ├── llm.service.ts        # LLM 统一调用
 │       │   ├── call-orchestrator.ts  # v1 通话编排
 │       │   ├── hook-service.ts       # Hook 领域能力
@@ -204,7 +241,10 @@ postCheck(output) → allow / sanitize / block
 │   ├── server.py
 │   └── requirements.txt
 ├── docs/                         # 项目文档
-│   └── agent-architecture.md     # Agent 架构全景文档
+│   ├── agent-architecture.md     # Agent 架构全景文档（v2 修订版）
+│   ├── call-architecture.md      # 通话链路架构文档
+│   ├── call-refactor-design.md   # v2.1 通话重构方案
+│   └── 2026-06-14-import-memory-image-word-pdf-design.md
 ├── public/                       # 静态资源
 ├── scripts/                      # 启动脚本
 ├── .env.example                  # 环境变量模板
@@ -285,9 +325,12 @@ AGENT_ARCH_VERSION=v2
 AGENT_V2_CHAT=true    # 子女端聊天链路
 AGENT_V2_CALL=true    # 通话链路
 AGENT_V2_HOOK=true    # 主动关怀链路
+
+# v2.1 三步编排（需先开启 v2）
+AGENT_V21_CALL=true   # 通话链路三步编排
 ```
 
-v2 workflow 抛错时自动 fallback 到 v1，保证服务可用性。
+v2/v2.1 workflow 抛错时自动 fallback 到 v1，保证服务可用性。
 
 ---
 
@@ -340,13 +383,37 @@ AI 回复严格遵守以下安全策略：
 
 ### Vercel 部署（推荐）
 
-项目已配置 `vercel.json`，可直接部署到 Vercel：
+项目已部署到 Vercel 生产环境，配置如下：
 
-```bash
-npx vercel --prod
-```
+| 配置项 | 值 |
+|--------|-----|
+| **域名** | `dianji.weirdwork.cn` |
+| **区域** | `hkg1`（香港节点） |
+| **框架** | Next.js 16 |
+| **仓库** | `github.com/wangmengchen1211/youdiandianji-` |
 
-> **注意：** OCR 服务（PaddleOCR）需要本地部署，Vercel 环境下 OCR 功能自动降级。
+**Vercel 环境变量清单：**
+
+| 变量 | 说明 |
+|------|------|
+| `DEEPSEEK_API_KEY` | DeepSeek API 密钥（必需） |
+| `MINIMAX_API_KEY` | MiniMax TTS 密钥（可选） |
+| `MINIMAX_VOICE` | 音色 ID（默认 `female-shaonv`） |
+| `TTS_PROVIDER` | 强制指定 TTS（Vercel 建议设为 `browser`） |
+
+> **注意：**
+> - OCR 服务（PaddleOCR）需要本地部署，Vercel 环境下 OCR 功能自动降级
+> - Vercel 美国服务器无法访问 MiniMax 代理地址，TTS 会自动降级为浏览器原生语音
+> - 生产环境建议设置 `TTS_PROVIDER=browser` 跳过服务端 TTS 超时
+
+**阿里云 DNS 配置（CNAME 解析）：**
+
+| 字段 | 值 |
+|------|-----|
+| 记录类型 | `CNAME` |
+| 主机记录 | `dianji` |
+| 记录值 | `cname.vercel-dns.com` |
+| TTL | 10 分钟 |
 
 ### 本地生产环境
 
@@ -359,13 +426,18 @@ npm run start
 
 ## 项目状态
 
-- **v1 架构**：17 个 Agent 并列，功能完整可用
+- **v1 架构**：17 个 Agent 并列，功能完整可用（已标记 @deprecated）
 - **v2 架构**：已完成实施，通过 Feature Flag 灰度控制
   - 8 个 Cognitive Skills（合并自 17 个 Agent）
   - 5 个 Workflow Orchestrators
   - 三层安全服务
   - 事件总线
   - v1 自动 fallback
+- **v2.1 通话重构**：三步编排（UnderstandTurn → DecideNextAction → GenerateReply）
+  - LLM 提议，状态机校验（解决状态机管太多的问题）
+  - 9 字段完整日志系统
+  - 身份锁定（caregiver/elder/assistant 三方角色）
+- **生产部署**：已上线 Vercel（`dianji.weirdwork.cn`）
 
 ---
 
