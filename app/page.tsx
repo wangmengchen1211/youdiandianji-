@@ -820,6 +820,148 @@ function mergeById<T extends { id: string }>(local: T[], remote: T[]): T[] {
   return Array.from(map.values());
 }
 
+// ════════════════════════════════════════════════════════════════════
+// 记忆库过滤与分类引擎
+// ════════════════════════════════════════════════════════════════════
+
+/**
+ * 判断长辈通话回复是否为临时状态应答，应被过滤不存入记忆库。
+ * 过滤三类无价值回复：
+ *   1. 简单应答 / 状态确认（方便、不方便、好的、嗯嗯）
+ *   2. 过渡性回复（知道了、收到、明白）
+ *   3. 机械式确认（记住了、在听）
+ */
+function isTransientResponse(text: string): boolean {
+  // 去除标点和首尾空格后归一化
+  const normalized = text.replace(/[\s\p{P}]/gu, "").trim();
+  if (!normalized) return true;
+
+  // ── 过滤词典（精确匹配，不分词） ──────────────────────────────
+  const FILTER_SET = new Set([
+    // 简单肯定/否定
+    "\u55ef", "\u55ef\u55ef", "\u55ef\u55ef\u55ef", "\u55ef\u55ef\u55ef\u55ef",
+    "\u597d", "\u597d\u7684", "\u597d\u5440", "\u597d\u7684\u5440", "\u884c", "\u5bf9", "\u662f\u7684", "\u4e0d\u662f", "\u6ca1\u95ee\u9898",
+    "\u53ef\u4ee5", "\u4e0d\u53ef\u4ee5", "\u5bf9\u7684", "\u4e0d\u5bf9",
+    // 状态确认
+    "\u65b9\u4fbf", "\u4e0d\u65b9\u4fbf", "\u6709\u7a7a", "\u6ca1\u7a7a", "\u6709\u65f6\u95f4", "\u6ca1\u65f6\u95f4",
+    "\u5728\u5bb6", "\u4e0d\u5728\u5bb6", "\u5728\u5462", "\u5728\u7684",
+    "\u5403\u4e86", "\u6ca1\u5403", "\u5403\u8fc7\u4e86", "\u5403\u4e86\u4e86",
+    "\u5403\u4e86\u5417", "\u5403\u997a\u5b50\u4e86\u5417", "\u5403\u997d\u4e86\u5417",
+    "\u5e8a\u4e86", "\u7761\u4e86", "\u8d77\u6765\u4e86", "\u6ca1\u7761",
+    "\u62ff\u4e86", "\u4e70\u4e86", "\u53bb\u4e86",
+    // 过渡性回复 / 机械反馈
+    "\u77e5\u9053\u4e86", "\u77e5\u9053\u5566", "\u77e5\u9053\u5440", "\u6653\u5f97\u4e86", "\u6653\u5f97\u5566",
+    "\u660e\u767d", "\u660e\u767d\u4e86", "\u6536\u5230", "\u6536\u5230\u4e86",
+    "\u8bb0\u4f4f\u4e86", "\u8bb0\u4f4f\u5440", "\u8bb0\u7740\u4e86", "\u8bb0\u7740\u5440",
+    "\u5728\u542c", "\u5728\u5462", "\u542c\u7740\u5462", "\u8bf4\u7740\u5462",
+    "\u4f60\u8bf4", "\u4f60\u8bf4\u5427", "\u6211\u542c\u7740", "\u6211\u542c\u7740\u5462",
+    "\u597d\u7684\u6211\u77e5\u9053\u4e86", "\u884c\u6211\u77e5\u9053\u4e86",
+    // 语气词
+    "\u5662", "\u54e6", "\u54ce", "\u5440", "\u5440\u5440", "\u5475\u5475", "\u54c8\u54c8", "\u563b\u563b",
+    "\u559d", "\u554a", "\u5440", "\u54ce\u5440",
+    "\u90a3\u4e2a", "\u8fd9\u4e2a", "\u5657", "\u5475",
+    "\u55ef\u90a3", "\u55ef\u884c", "\u55ef\u597d", "\u55ef\u5bf9",
+    "\u55ef\u77e5\u9053\u4e86", "\u55ef\u6653\u5f97\u4e86",
+    "\u884c\u884c\u884c", "\u597d\u597d\u597d", "\u5bf9\u5bf9\u5bf9",
+    "\u662f\u662f\u662f", "\u5bf9\u7684\u5bf9\u7684",
+  ]);
+
+  if (FILTER_SET.has(normalized)) return true;
+
+  // ── 正则过滤：纯语气词 / 极短无实质内容 ──────────────────────
+  // 例："嗯嗯好好好" "好的好的" "行行行" → 过滤
+  if (/^(\u55ef+|\u597d+|\u884c+|\u5bf9+|\u662f+|\u54e6+|\u5440+|\u54ce+|\u5440+|\u559d+|\u554a+){1,3}$/.test(normalized)) return true;
+
+  // ── 长度过滤：去标点后 ≤2 字且不含关键词 → 过滤 ────────────────
+  // 保留 2 字以上的健康/情绪词（如 "头痖" "心谖"），但过滤 "啊好" "嗯行"
+  if (normalized.length <= 2) {
+    const HAS_SUBSTANTIVE_2CHAR = /(\u75bc|\u75db|\u7d2f|\u6124|\u9600|\u6050|\u6124|\u7126\u8651|\u836f|\u75c5|\u75d6|\u538b|\u7cd6|\u6123|\u60f3|\u5ff5|\u6302|\u7275|\u60c5)/;
+    if (!HAS_SUBSTANTIVE_2CHAR.test(normalized)) return true;
+  }
+
+  // ── 模式过滤："X了" / "X了" 结构的简单确认 ─────────────────────
+  // 例："吃过了" "拿过了" "知道了呀"
+  if (/^(\u5403|\u62ff|\u4e70|\u53bb|\u7ed9|\u5e26|\u770b|\u8bb0|\u542c|\u8bf4|\u7761|\u8d77|\u5230|\u56de)(\u8fc7)?\u4e86(\u5440|\u554a|\u5417|\u4e86)?$/.test(normalized)) return true;
+
+  // ── 超短回复带 "好的/嗯" 前缀 → 过滤 ───────────────────────────
+  // 例："好的我知道了" "嗯嗯明白" "好的收到"
+  if (/^(\u597d\u7684|\u55ef\u55ef|\u55ef|\u884c|\u5bf9)(\u6211)?(\u77e5\u9053\u4e86|\u6653\u5f97\u4e86|\u660e\u767d\u4e86|\u6536\u5230\u4e86|\u8bb0\u4f4f\u4e86|\u660e\u767d|\u6536\u5230|\u77e5\u9053|\u6653\u5f97)$/.test(normalized)) return true;
+
+  return false; // 不在过滤范围，保留
+}
+
+/**
+ * 对长辈回复进行语义分类，返回应归档的记忆类别（或 null 表示不存储）。
+ * 六大分类：health / routine / preference / relationship / relay / emotional
+ * + 兜底 about_elder（仅在内容有实质价值时才存）
+ */
+function classifyMemoryContent(
+  text: string,
+  taskType: string,
+  hasRelayMessage: boolean,
+): { category: MemoryCategory; importance: "high" | "medium" | "low" }[] {
+  const normalized = text.trim();
+  if (!normalized) return [];
+
+  const results: { category: MemoryCategory; importance: "high" | "medium" | "low" }[] = [];
+  const isHealthTask = taskType === "medication" || taskType === "health_measurement";
+  const isRoutineTask = taskType === "bring_items" || taskType === "call_back";
+
+  // 1) health_memory → elder_health
+  //    精确匹配健康关键词，避免 "吃饭了吗" 被误判
+  const HEALTH_RE = /(\u8840\u538b|\u8840\u7cd6|\u5fc3\u7535\u56fe|\u6307\u6807|\u5316\u9a8c|\u68c0\u67e5|\u590d\u8bca|\u624b\u672f|\u4f4f\u9662|\u533b\u751f|\u533b\u9662|\u4f4f\u9662|\u7ed3|\u75bc|\u75db|\u4e0d\u8212\u670d|\u4e0d\u8212\u670d|\u538b\u6291|\u6291\u90c1|\u7126\u8651|\u5fe7\u90c1|\u7cd6\u5c3f\u75c5|\u7cd6\u5c3f|\u7532\u72b6\u817a|\u7532\u72b6\u817a|\u4e59\u7532\u4e50|\u964d\u538b\u836f|\u836f\u7269|\u670d\u836f|\u5403\u836f|\u6f0f\u670d|\u62fc\u811a|\u80bf|\u764c|\u764c\u75c7|\u7597|\u7597\u72b6|\u75c5\u60c5|\u75c5\u538b|\u80c6\u56fa\u9187|\u9aa8\u8d28|\u9aa8\u5bc6\u5ea6|\u5fc3\u810f|\u8840\u810f|\u809d|\u80be|\u80c3|\u80a0|\u80ba|\u6c14\u7ba1|\u559d\u9152|\u62bd\u70df|\u6577\u836f|\u8f6f\u818f|\u8d34\u818f|\u542b\u7247|\u836f\u7247|\u80f6\u56ca|\u8865\u54c1|\u4fdd\u5065\u54c1|\u7ef4\u751f\u7d20)/;
+  if (isHealthTask || HEALTH_RE.test(normalized)) {
+    results.push({ category: "elder_health", importance: "high" });
+  }
+
+  // 2) routine_memory → elder_habits
+  //    生活习惯：作息、饮食、运动、社交
+  const ROUTINE_RE = /(\u4f5c\u606f|\u65e9\u9910|\u5348\u9910|\u665a\u9910|\u6563\u6b65|\u6162\u8dd1|\u592a\u6781|\u4e0b\u68cb|\u6253\u724c|\u575a\u6301|\u6bcf\u5929|\u4e60\u60ef|\u4e60\u60ef\u6027|\u89c4\u5f8b|\u996e\u98df|\u5403\u9971|\u9971\u4e86|\u9971|\u6cae\u6cae|\u919b\u919b|\u919b\u6cae|\u65e9\u8d77|\u65e9\u7761|\u7761\u5f97|\u7761\u7720|\u591a\u5c11\u70b9\u7761|\u51e0\u70b9\u7761|\u793e\u4ea4|\u901b\u8857|\u4e70\u83dc|\u505a\u997a\u5b50|\u505a\u996d|\u70f9\u996a|\u591a\u8d70\u52a8|\u591a\u8fd0\u52a8|\u5c11\u51fa\u95e8|\u5f88\u5c11\u51fa\u95e8|\u4e0d\u51fa\u95e8|\u670b\u53cb|\u90bb\u5c45|\u5e38\u53bb|\u5076\u5c14|\u4e0a\u5348|\u4e0b\u5348|\u508d\u665a|\u665a\u4e0a|\u6e05\u6668|\u8d77\u5e8a\u540e|\u7761\u524d|\u7761\u540e|\u4e0a\u5348\u53bb|\u4e0b\u5348\u53bb|\u4e0a\u8bfe|\u5b66|\u7ec3|\u529f\u592b|\u5e7f\u573a\u821e|\u6253\u592a\u6781|\u506f\u4e0b\u624b|\u770b\u7535\u89c6|\u542c\u6536\u97f3\u673a|\u542c\u620f|\u770b\u620f)/;
+  if (isRoutineTask || ROUTINE_RE.test(normalized)) {
+    results.push({ category: "elder_habits", importance: "medium" });
+  }
+
+  // 3) preference_memory → chat_expression
+  //    沟通偏好 / 渠口偏好
+  const PREF_RE = /(\u522b\u603b|\u522b\u95ee|\u522b\u63d0|\u4e0d\u8981\u8bf4|\u4e0d\u559c\u6b22|\u4e0d\u613f\u610f|\u4e0d\u60f3|\u8ba8\u538c|\u592a\u70e6|\u8d31\u5165|\u5e0c\u671b|\u504f\u597d|\u559c\u6b22|\u4e50\u610f|\u613f\u610f|\u522b\u53eb|\u79f0\u547c|\u53eb\u6211|\u522b\u7ba1\u6211|\u522b\u64c5\u5fc3|\u4e0d\u7528\u7ba1|\u6e29\u67d4|\u8f7b\u677e|\u4e0d\u8981\u538b\u529b|\u8bf4\u6559|\u5570\u5531|\u9192\u9192|\u8bf4\u8bdd\u65b9\u5f0f|\u8bed\u6c14|\u53e3\u6c14|\u591a\u804a\u5bb6\u5e38|\u5bb6\u5e38\u8bdd|\u522b\u50ac|\u522b\u50ac\u4e86|\u522b\u717d|\u522b\u63a8|\u8bf4\u6211\u4e86|\u5e0c\u671b\u4f60\u4eec)/;
+  if (PREF_RE.test(normalized)) {
+    results.push({ category: "chat_expression", importance: "medium" });
+  }
+
+  // 4) emotional_signal → pending_review
+  //    情绪信号 / 心理状态（与 relationship 不同：这里是自身情绪，不一定指向家人）
+  const EMOTION_RE = /(\u5fc3\u60c5|\u5fc3\u91cc|\u5f88\u5bc2\u5bde|\u5bc2\u5bde|\u5b64\u72ec|\u72ec\u81ea|\u5f88\u96be\u8fc7|\u96be\u8fc7|\u4f24\u5fc3|\u59d4\u5c48|\u4e0d\u5f00\u5fc3|\u5f88\u9ad8\u5174|\u5f00\u5fc3|\u5feb\u4e50|\u5934\u5165|\u7126\u8651|\u62c5\u5fc3|\u5bb3\u6015|\u6050\u614c|\u5fe0\u6102|\u60c5\u7eea\u4f4e|\u60c5\u7eea\u4e0d\u597d|\u5fc3\u91cc\u4e0d\u8212\u670d|\u5fc3\u91cc\u96be\u53d7|\u60f3\u54ed|\u54ed\u4e86|\u5f88\u7d2f|\u592a\u7d2f\u4e86|\u7d2f\u6b7b\u4e86|\u6ca1\u52b2|\u6ca1\u610f\u601d|\u4ec0\u4e48\u90fd\u4e0d\u60f3\u505a|\u4ec0\u4e48\u90fd\u4e0d\u60f3\u7ba1|\u5f88\u591a\u4e8b\u60c5|\u60f3\u4e2a\u4eba\u5f85\u7740|\u5fc3\u91cc\u5f88\u4e71|\u7761\u4e0d\u7740|\u5931\u7720|\u5012\u95ed|\u62d2\u7edd|\u62b5\u89e6|\u4e0d\u60f3\u8bf4\u8bdd|\u4e0d\u60f3\u7406|\u5f88\u70e6|\u70e6\u8e81|\u70e6\u6b7b\u4e86|\u6c14\u4e0d\u987a|\u751f\u6c14|\u5fc3\u75bc|\u5fc3\u91cc\u5835\u5f97\u614c|\u60f3\u6563\u6563\u5fc3|\u5fc3\u91cc\u5835|\u6cea|\u6d17\u6d17|\u54ed\u6ce3|\u60c5\u611f\u6ce2\u52a8|\u5f88\u611f\u52a8|\u611f\u52a8\u5f97\u54ed|\u8d85\u5f00\u5fc3)/;
+  if (EMOTION_RE.test(normalized)) {
+    results.push({ category: "pending_review", importance: "high" });
+  }
+
+  // 5) relationship_memory → relationship
+  //    对家人的牵挂 / 情感表达 / 互动模式 / 叮嘱嘱咐
+  const RELATION_RE = /(\u60f3\u4f60|\u60f3\u5ff5|\u7275\u6302|\u6302\u5ff5|\u6302\u7275|\u5fc3\u75bc|\u5fc3\u75bc\u4f60|\u8bb0\u6302|\u60f3\u7740|\u5ff5\u53e8|\u5ff5\u53e8\u4f60|\u60f3\u5ff5\u4f60|\u60f3\u5ff5\u5bb6\u4eba|\u5bb6\u4eba|\u5b69\u5b50|\u5c0f\u96e8|\u5973\u513f|\u513f\u5b50|\u5973\u5a7f|\u513f\u5ab3|\u5b59\u5b50|\u5b59\u5973|\u5916\u5b59|\u5916\u5b59\u5973|\u8001\u4f34|\u8001\u5934\u5b50|\u5f1f\u5f1f|\u54e5\u54e5|\u59d0\u59d0|\u59b9\u59b9|\u5144\u5f1f|\u59d0\u5f1f|\u53d4\u53d4|\u963f\u59e8|\u53d4\u5a46|\u5927\u5985|\u4ed6\u4eec|\u5c0f\u5b69|\u5c0f\u5b9d\u5b9d|\u53eb\u4ed6|\u544a\u8bc9\u4ed6|\u544a\u8bc9\u5979|\u544a\u8bc9\u5c0f\u96e8|\u8bb0\u5f97\u544a\u8bc9|\u4ed6\u77e5\u9053|\u5979\u77e5\u9053|\u5c0f\u96e8\u77e5\u9053|\u53eb\u5c0f\u96e8|\u53eb\u4ed6\u4eec|\u5e2e\u6211\u8bf4|\u5e2e\u6211\u544a\u8bc9|\u5e2e\u6211\u8f6c\u544a|\u5e2e\u6211\u8bb0\u7740|\u53ee\u5604|\u53ee\u5604\u4ed6|\u53ee\u5631|\u5631\u6258|\u5631\u4f53|\u8bb0\u5f97\u5403|\u8bb0\u5f97\u7761|\u8bb0\u5f97\u4f11\u606f|\u522b\u7d2f|\u522b\u592a\u7d2f|\u522b\u71ac\u591c|\u591a\u4f11\u606f|\u6ce8\u610f|\u6ce8\u610f\u8eab\u4f53|\u6ce8\u610f\u4fdd\u6696|\u522b\u6dcc\u7740|\u522b\u51b2\u7740|\u522b\u8d76|\u6162\u6162\u6765|\u4e0d\u7740\u6025|\u8fd8\u6709\u6211|\u6709\u6211\u5462|\u6709\u6211\u966a|\u966a\u4f60|\u966a\u4f60\u804a|\u8bb0\u5f97\u56de\u5bb6|\u8bb0\u5f97\u56de\u6765|\u5e38\u56de\u6765|\u5e38\u56de\u5bb6|\u4ed6\u60f3\u4f60|\u5979\u60f3\u4f60|\u5c0f\u96e8\u60f3\u4f60|\u4ed6\u5f88\u60f3\u4f60|\u5979\u5f88\u60f3\u4f60|\u5c0f\u96e8\u5f88\u60f3\u4f60|\u5fc3\u75bc\u5b69\u5b50|\u820d\u4e0d\u5f97|\u4e0d\u820d|\u4f0f\u5929|\u5c0f\u5fc3|\u4fdd\u91cd|\u597d\u597d\u7167\u987e|\u7167\u987e\u81ea\u5df1|\u7167\u987e\u597d\u81ea\u5df1|\u522b\u8ba9\u4ed6|\u522b\u8ba9\u5979|\u522b\u8ba9\u5c0f\u96e8|\u4e0d\u7528\u62c5\u5fc3|\u4e0d\u7528\u64c5\u5fc3|\u522b\u62c5\u5fc3|\u522b\u64c5\u5fc3)/;
+  if (RELATION_RE.test(normalized)) {
+    results.push({ category: "relationship", importance: "high" });
+  }
+
+  // 6) relay_memory → relationship
+  //    有 relayMessage 时单独记一条带话记忆（调用方处理）
+  //    这里也检测回复中是否提到要给家人带话
+  const RELAY_RE = /(\u5e2e\u6211\u8bf4|\u5e2e\u6211\u544a\u8bc9|\u5e2e\u6211\u8f6c\u544a|\u5e2e\u6211\u8bb0\u7740|\u8bb0\u5f97\u544a\u8bc9|\u8bb0\u5f97\u8bf4|\u544a\u8bc9\u5c0f\u96e8|\u544a\u8bc9\u4ed6|\u544a\u8bc9\u5979|\u8bf4\u7ed9\u4ed6|\u8bf4\u7ed9\u5979|\u8bf4\u7ed9\u5c0f\u96e8|\u53eb\u4ed6\u522b|\u53eb\u5979\u522b|\u53eb\u5c0f\u96e8\u522b|\u8ba9\u4ed6\u77e5\u9053|\u8ba9\u5979\u77e5\u9053|\u8ba9\u5c0f\u96e8\u77e5\u9053|\u8bf4\u6211\u60f3|\u8bf4\u6211\u5f88\u60f3|\u8bb0\u5f97\u8ddf|\u8bb0\u5f97\u7ed9|\u5e2e\u6211\u8bb0\u4e0b)/;
+  if (hasRelayMessage || RELAY_RE.test(normalized)) {
+    // 如果尚未归入 relationship，额外添加一条 relay 记录
+    if (!results.some(r => r.category === "relationship")) {
+      results.push({ category: "relationship", importance: "high" });
+    }
+  }
+
+  // 7) 兜底：有实质内容但未匹配以上分类 → about_elder
+  //    仅在未被过滤（有足够信息量）时才存
+  if (results.length === 0) {
+    results.push({ category: "about_elder", importance: "medium" });
+  }
+
+  return results;
+}
+
 function buildDemoState(): StoredState {
   const elders: Elder[] = [
     {
@@ -2370,90 +2512,41 @@ export default function HomePage() {
         content: warmReceipt,
       });
 
-      // Auto-extract memory entries (Step 4)
-      // 覆盖 6 类语义化记忆：health / routine / preference / relationship / relay / emotional_signal
+      // ── 记忆库过滤与分类（Step 4） ────────────────────────────────
+      // 先过滤临时状态回复，再按六大分类归档
       const newMemories: MemoryEntry[] = [];
+      const CATEGORY_LABELS: Partial<Record<MemoryCategory, string>> = {
+        elder_health: "健康相关",
+        elder_habits: "生活习惯",
+        chat_expression: "沟通偏好",
+        pending_review: "情绪信号",
+        relationship: "牵挂与叮嘱",
+        about_elder: "最近回复",
+      };
       if (result && result.trim().length > 0) {
         const resultText = result.trim();
-        const isHealthContext = task.type === "medication" || task.type === "health_measurement";
-        const isRoutineContext = task.type === "bring_items" || task.type === "call_back";
-
-        // 1) health_memory → elder_health：健康相关关键词 或 健康类任务
-        if (
-          isHealthContext ||
-          /(血压|血糖|药|疼|不舒服|手术|医生|医院|指标|化验|检查|测|吃|喝|廗|手术|治療)/.test(resultText)
-        ) {
-          newMemories.push({
-            id: uid("mem"),
-            category: "elder_health",
-            content: `${elderName}健康相关：${resultText}`,
-            source: `通话: ${task.title}`,
-            importance: "high",
-            elderId: task.elderId,
-            createdAt: nowLabel(),
-          });
-        }
-
-        // 2) routine_memory → elder_habits：生活习惯 / 作息 / 物品传送
-        if (
-          isRoutineContext ||
-          /(每天|早上|晚上|中午|经常|很少|习惯|时间|几点|去|买|拿|带)/.test(resultText)
-        ) {
-          newMemories.push({
-            id: uid("mem"),
-            category: "elder_habits",
-            content: `${elderName}生活习惯：${resultText}`,
-            source: `通话: ${task.title}`,
-            importance: "medium",
-            elderId: task.elderId,
-            createdAt: nowLabel(),
-          });
-        }
-
-        // 3) preference_memory → chat_expression：沟通偏好 / 渠口偏好
-        if (
-          /(别提|不要说|不要|别问|别总|不喜欢|讨厌|太烦|感谢|谢谢|喜欢|爱好|乐意)/.test(resultText)
-        ) {
-          newMemories.push({
-            id: uid("mem"),
-            category: "chat_expression",
-            content: `${elderName}沟通偏好：${resultText}`,
-            source: `通话: ${task.title}`,
-            importance: "medium",
-            elderId: task.elderId,
-            createdAt: nowLabel(),
-          });
-        }
-
-        // 4) emotional_signal → pending_review：情绪信号需复看
-        if (
-          /(想|惦记|孤单|难过|不开心|失眠|担心|怕|累|烦|无聊|心情|高兴|开心|想念|挂念)/.test(resultText)
-        ) {
-          newMemories.push({
-            id: uid("mem"),
-            category: "pending_review",
-            content: `${elderName}情绪信号：${resultText}`,
-            source: `通话: ${task.title}`,
-            importance: "high",
-            elderId: task.elderId,
-            createdAt: nowLabel(),
-          });
-        }
-
-        // 5) about_elder 兑底：未匹配上任何语义分类时记录事实型记忆
-        if (newMemories.length === 0) {
-          newMemories.push({
-            id: uid("mem"),
-            category: "about_elder",
-            content: `${elderName}最近回复：${resultText}`,
-            source: `通话: ${task.title}`,
-            importance: "medium",
-            elderId: task.elderId,
-            createdAt: nowLabel(),
-          });
+      
+        // ── 过滤检查：识别并跳过临时状态回复 ───────────────────────
+        if (isTransientResponse(resultText)) {
+          console.log("[memory] 过滤临时状态回复，不存入记忆库:", resultText);
+        } else {
+          // 按六大分类归档
+          const categories = classifyMemoryContent(resultText, task.type, !!task.relayMessage);
+          for (const { category, importance } of categories) {
+            const label = CATEGORY_LABELS[category] ?? "其他";
+            newMemories.push({
+              id: uid("mem"),
+              category,
+              content: `${elderName}${label}：${resultText}`,
+              source: `通话: ${task.title}`,
+              importance,
+              elderId: task.elderId,
+              createdAt: nowLabel(),
+            });
+          }
         }
       }
-      // 6) relay_memory / relationship_memory → relationship：带话原话记录
+      // relay_memory：带话原话记录（不受过滤影响，这是子女的原话）
       if (task.relayMessage) {
         newMemories.push({
           id: uid("mem"),
