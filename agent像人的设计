@@ -1,0 +1,1373 @@
+可以，你这个判断非常关键：现在的小助理不是“不够会共情”，而是**缺少深度对话框架、主动追问策略、长期关系记忆和触发式再联系机制**。
+
+也就是说，它现在像：
+
+> 情绪客服：听起来你很担心，我可以帮你提醒妈妈。
+
+但你要的是：
+
+> 亲情关系顾问 + 关怀代理：听到“妈妈好像有点老年痴呆”后，它能判断这是一个高价值、高敏感度话题，先帮用户澄清事实、挖掘观察证据、理解老人心理、理解亲子关系张力，再给出下一步可执行建议，并在合适时间主动跟进。
+
+我重新查了一些开源项目和研究方向，最值得借鉴的是这几类：
+
+- **Thoughtful Agents**：它不是简单预测下一句话，而是引入“内心想法”机制，包括触发、记忆检索、想法形成、评估表达动机、决定是否参与对话，适合借鉴为“先想一层，再说一句”。([github.com](https://github.com/xybruceliu/thoughtful-agents))  
+- **Generative Agents**：斯坦福/Google 的生成式智能体架构强调记忆、反思、计划和行动，适合借鉴“观察 → 记忆 → 反思 → 计划 → 对话”的人格化 Agent 框架。([dl.acm.org](https://dl.acm.org/doi/fullHtml/10.1145/3586183.3606763))  
+- **MapDia**：它提出 Memory-aware Proactive Dialogue，把长期对话历史用于主动话题切换，包含话题总结、话题检索、主动转场检测与生成，正好适合你的“从用户一句话里主动深挖历史和关系”。([aclanthology.org](https://aclanthology.org/2025.conll-1.4/))  
+- **ProactiveAgent / THUNLP ProactiveAgent**：前者偏时间感和主动发言，后者强调环境感知、主动预测用户可能需要什么帮助，适合借鉴你说的“某个任务结束、用户几小时后回来、节日纪念日、异常事件后主动发消息”。([github.com](https://github.com/leomariga/ProactiveAgent))  
+- **Letta / MemGPT**：它把 Agent 做成有持久记忆的 stateful agent，区分核心记忆、对话回忆和长期档案，这对你沉淀“妈妈的状态、子女的压力、双方关系模式”非常重要。([github.com](https://github.com/letta-ai/letta))  
+- **Rasa**：虽然更传统，但它的价值在于“对话管理”是可组合、可控的，而不是把所有逻辑塞进一个大 prompt。你的产品也应该用状态机和策略层管理深度对话。([rasa.community](https://rasa.community/))  
+- **Sibyl / EmpatheticDialogues 类研究**：它们说明单纯情绪安慰是不够的，真正有效的共情需要推断对话中的隐含需求和下一步支持方向。([aclanthology.org](https://aclanthology.org/2025.coling-main.10/))  
+
+下面这份可以直接保存为：
+
+# `突然有点惦记你们_深度对话与主动Hook_Agent设计文档.md`
+
+---
+
+# 「突然有点惦记你们」深度对话与主动 Hook Agent 设计文档
+
+版本：MVP v0.4  
+目标：把小助理从“机械共情 + 任务提醒”升级为“能深挖、能判断、能主动跟进、像人一样有洞察力的亲情中介 Agent”。
+
+---
+
+## 1. 当前问题
+
+现在的小助理主要存在 4 个问题：
+
+### 1.1 共情太浅
+
+用户说：
+
+```text
+妈妈好像有一点老年痴呆。
+```
+
+当前小助理可能回复：
+
+```text
+听起来你很担心，这一定让你很揪心。我可以帮你设置提醒。
+```
+
+问题是：
+
+- 只停留在情绪安慰；
+- 没有继续深挖；
+- 没有区分“医学风险”“生活影响”“关系变化”“用户压力”；
+- 没有帮助用户把模糊担忧拆成可观察事实；
+- 没有生成后续跟进计划。
+
+---
+
+### 1.2 不会主动追问
+
+它没有问：
+
+- 你是怎么发现的？
+- 最近发生了哪些具体场景？
+- 是突然变化，还是慢慢变化？
+- 妈妈自己有没有意识到？
+- 她会不会因此害怕、羞耻、抗拒？
+- 你们现在沟通时，是她防御多，还是你着急多？
+- 有没有影响吃药、做饭、出门、财务、安全？
+- 你现在最担心的是她的健康，还是你不知道怎么跟她说？
+
+---
+
+### 1.3 不会形成洞察
+
+它不能把用户输入整理成：
+
+```text
+你现在担心的可能不只是“妈妈记性变差”，而是：
+1. 你不确定这是不是正常衰老；
+2. 你怕直接说会伤害她；
+3. 你开始意识到自己可能要承担更多照护责任；
+4. 你们之间原本的沟通方式可能需要改变。
+```
+
+---
+
+### 1.4 不会主动再联系
+
+它不会在这些时机主动出现：
+
+- 通话任务结束后；
+- 用户 6 小时后重新打开 App；
+- 用户提到高敏感话题后 24 小时；
+- 老人连续几次异常回复后；
+- 老人生日、节日、忌日、复诊日前；
+- 用户长期没登录但老人有未确认任务；
+- 子女最近高压、加班、内疚时；
+- 老人提到孤独、忘事、头晕、摔倒、睡不好时。
+
+---
+
+## 2. 新目标
+
+小助理需要升级为：
+
+```text
+Deep Relational Care Agent
+```
+
+它应该具备 5 种能力：
+
+1. **深度理解**：识别用户话里的事实、情绪、风险、关系张力和隐含需求。
+2. **主动追问**：不是马上安慰，而是用 1-3 个好问题帮用户把事情讲清楚。
+3. **关系洞察**：理解用户和老人之间的互动模式，而不只是处理任务。
+4. **关怀规划**：把模糊担忧转成下一步行动，例如观察、记录、约医生、换说法、设置柔性提醒。
+5. **主动 Hook**：在合适时机主动发消息，不打扰，但像一个惦记这件事的人。
+
+---
+
+## 3. 总体架构
+
+```mermaid
+flowchart TD
+A[用户输入] --> B[Situation Recognizer 情境识别]
+B --> C[Depth Planner 深度对话规划]
+C --> D[Probe Generator 主动追问生成]
+D --> E[User Response 用户继续回答]
+
+E --> F[Case Formulation Builder 个案理解]
+F --> G[Care Strategy Planner 关怀策略]
+G --> H[Response Realizer 输出给用户]
+
+F --> I[Memory Curator 记忆沉淀]
+I --> J[(Family Memory Store)]
+
+F --> K[Hook Candidate Generator 生成主动触达候选]
+K --> L[Hook Scheduler / Trigger Engine]
+L --> M[Relevance & Safety Scorer]
+M --> N[主动消息发送/排队]
+
+N --> O[用户再次进入]
+O --> B
+```
+
+---
+
+## 4. 核心思想：不要直接回答，要先“建模”
+
+用户抛出一句话时，小助理不要马上回复完整建议，而是先完成内部建模。
+
+### 4.1 用户原话
+
+```text
+妈妈好像有一点老年痴呆。
+```
+
+### 4.2 小助理内部不要只识别为
+
+```json
+{
+  "emotion": "担心",
+  "intent": "寻求安慰"
+}
+```
+
+### 4.3 应该识别为
+
+```json
+{
+  "situation_type": "possible_cognitive_decline",
+  "risk_level": "medium_high",
+  "domains": [
+    "health",
+    "elder_psychology",
+    "caregiver_anxiety",
+    "parent_child_relationship",
+    "future_care_planning"
+  ],
+  "user_need_hypotheses": [
+    "想确认妈妈是不是异常衰退",
+    "不知道如何和妈妈开口",
+    "担心自己未来照顾不了",
+    "需要记录具体症状",
+    "需要一个温和的沟通方案"
+  ],
+  "should_not_do": [
+    "不能诊断",
+    "不能直接说妈妈有痴呆",
+    "不能只共情",
+    "不能立刻给任务提醒"
+  ],
+  "next_best_action": "ask_targeted_questions"
+}
+```
+
+---
+
+## 5. 新增模块一：Situation Recognizer
+
+### 5.1 职责
+
+识别用户输入属于哪种深度情境。
+
+### 5.2 情境类型
+
+```json
+[
+  "possible_cognitive_decline",
+  "elder_health_change",
+  "elder_emotional_distress",
+  "caregiver_burnout",
+  "parent_child_conflict",
+  "guilt_and_distance",
+  "missed_medication",
+  "safety_risk",
+  "loneliness_signal",
+  "routine_care_task",
+  "relationship_repair",
+  "festival_or_anniversary_care"
+]
+```
+
+### 5.3 Prompt
+
+```text
+你是亲情关怀产品的情境识别器。
+
+用户会输入一句关于老人、家庭关系、照护压力或提醒任务的话。
+你的任务不是回复用户，而是判断这句话背后的情境类型、风险程度、隐含需求和下一步对话策略。
+
+你需要输出：
+1. situation_type：主要情境类型；
+2. secondary_types：次要情境；
+3. risk_level：low / medium / medium_high / high；
+4. explicit_need：用户明确说出的需求；
+5. implicit_needs：用户可能没有说出口但需要被理解的需求；
+6. missing_information：为了理解这件事还缺哪些关键信息；
+7. recommended_strategy：下一步应该安慰、追问、建议行动、还是触发安全提醒；
+8. forbidden_response：不能怎么回复。
+
+注意：
+- 如果涉及医疗或认知衰退，不能诊断。
+- 如果涉及老人突然意识混乱、走失、摔倒、用药错误等，标记 high risk。
+- 不要只识别情绪，要识别事实、关系和行动需求。
+```
+
+### 5.4 示例输出
+
+输入：
+
+```text
+妈妈好像有一点老年痴呆。
+```
+
+输出：
+
+```json
+{
+  "situation_type": "possible_cognitive_decline",
+  "secondary_types": [
+    "caregiver_anxiety",
+    "parent_child_relationship"
+  ],
+  "risk_level": "medium_high",
+  "explicit_need": "用户怀疑妈妈出现认知下降",
+  "implicit_needs": [
+    "需要判断哪些现象值得重视",
+    "需要把模糊担忧转化为可观察记录",
+    "需要学习如何不伤害妈妈自尊地沟通",
+    "需要知道是否应该建议就医评估",
+    "需要被理解照护压力"
+  ],
+  "missing_information": [
+    "用户是通过哪些具体行为发现的",
+    "变化是突然还是逐渐发生",
+    "是否影响日常生活和安全",
+    "妈妈自己是否意识到变化",
+    "用户和妈妈谈这件事时是否容易冲突"
+  ],
+  "recommended_strategy": "ask_targeted_questions_before_advice",
+  "forbidden_response": [
+    "不能说妈妈就是老年痴呆",
+    "不能只说我理解你很担心",
+    "不能直接跳到设置提醒",
+    "不能提供诊断结论"
+  ]
+}
+```
+
+---
+
+## 6. 新增模块二：Depth Planner
+
+### 6.1 职责
+
+决定这一轮对话要往哪里深挖。
+
+Depth Planner 不是生成最终话术，而是决定：
+
+- 要先问事实，还是先接情绪？
+- 要问几个问题？
+- 问开放问题还是具体问题？
+- 是继续深挖，还是进入行动建议？
+- 是否需要创建一个长期关注 case？
+
+---
+
+### 6.2 深挖维度
+
+针对亲情照护场景，建议固定 7 个维度。
+
+```json
+[
+  {
+    "dimension": "observable_facts",
+    "description": "发生了什么具体行为"
+  },
+  {
+    "dimension": "timeline",
+    "description": "什么时候开始，变化快慢"
+  },
+  {
+    "dimension": "daily_function",
+    "description": "是否影响吃饭、吃药、出门、财务、安全"
+  },
+  {
+    "dimension": "elder_inner_state",
+    "description": "老人是否害怕、否认、羞耻、焦虑、孤独"
+  },
+  {
+    "dimension": "caregiver_inner_state",
+    "description": "用户是担心、内疚、害怕、无助还是疲惫"
+  },
+  {
+    "dimension": "relationship_pattern",
+    "description": "亲子之间是否容易冲突、回避或互相保护"
+  },
+  {
+    "dimension": "next_action",
+    "description": "下一步要观察、记录、沟通、提醒、就医还是找家人支持"
+  }
+]
+```
+
+---
+
+### 6.3 Depth Planner Prompt
+
+```text
+你是深度对话规划器。
+
+用户刚刚说了一句关于家人/老人/照护的担忧。
+你需要决定下一轮小助理应该如何深入，而不是马上给泛泛建议。
+
+请根据：
+- 情境识别结果；
+- 风险等级；
+- 已知家庭记忆；
+- 当前对话阶段；
+- 用户情绪；
+- 还缺哪些关键信息；
+
+输出下一步对话计划。
+
+规则：
+1. 如果信息不足，优先问具体观察，而不是马上建议。
+2. 如果用户提到医疗、认知、异常行为，不能诊断，要引导记录和专业评估。
+3. 每次最多问 2-3 个问题。
+4. 问题要有层次：先事实，再感受，再关系。
+5. 不要像问卷，要像一个懂事的人在帮用户理清。
+6. 如果用户明显焦虑，要先稳住情绪，再深挖。
+7. 如果存在高风险，建议及时联系家人或专业人士。
+```
+
+### 6.4 输出 Schema
+
+```json
+{
+  "conversation_stage": "initial_deepening",
+  "goal": "把用户的模糊担忧转化为具体观察",
+  "ask_dimensions": [
+    "observable_facts",
+    "timeline",
+    "daily_function"
+  ],
+  "questions": [
+    "你是从哪几件具体事情开始觉得不太对的？",
+    "这种变化是最近突然出现，还是这几个月慢慢变明显的？",
+    "有没有影响到她吃药、做饭、出门或用钱这些日常事情？"
+  ],
+  "response_style": "warm_but_grounded",
+  "should_create_case": true,
+  "case_type": "possible_cognitive_decline"
+}
+```
+
+---
+
+## 7. 新增模块三：Probe Generator
+
+### 7.1 职责
+
+把深挖计划生成自然、人味、非问卷式的话术。
+
+---
+
+### 7.2 好的回复示例
+
+用户：
+
+```text
+妈妈好像有一点老年痴呆。
+```
+
+小助理不应回复：
+
+```text
+这听起来让人很揪心。我可以帮你提醒妈妈按时吃药。
+```
+
+应该回复：
+
+```text
+这句话背后其实挺重的。先别急着给妈妈下判断，我们可以一起把它拆清楚一点。
+
+你是从哪几件具体事情开始觉得不对的？比如她是忘了刚说过的话、找不到东西、认错路，还是开始影响吃药、做饭、出门这些日常事了？
+```
+
+这里的关键是：
+
+- 先承认事情重要；
+- 避免诊断；
+- 直接进入事实澄清；
+- 给用户一些可回答的例子；
+- 不像问卷。
+
+---
+
+### 7.3 Probe Generator Prompt
+
+```text
+你是「突然有点惦记你们」的深度关怀小助理。
+
+你的任务是把后端给出的追问计划，改写成自然、有分寸、有洞察力的一段话。
+
+你不能：
+- 只机械共情；
+- 直接诊断；
+- 上来给解决方案；
+- 像医生问诊表；
+- 像客服；
+- 问太多问题；
+- 制造用户焦虑或内疚。
+
+你应该：
+- 先接住用户话里的重量；
+- 帮用户把模糊担忧拆成可观察事实；
+- 用 1-3 个高质量问题引导用户继续说；
+- 必要时提醒：这不能替代专业评估；
+- 语气像一个有经验、懂家庭关系的人。
+
+输入：
+用户原话：{{user_message}}
+情境识别：{{situation_analysis}}
+深挖计划：{{depth_plan}}
+家庭记忆：{{family_memory}}
+
+请输出一段自然回复。
+```
+
+---
+
+## 8. 关键场景：疑似认知下降对话策略
+
+### 8.1 不能做什么
+
+用户说“妈妈好像有一点老年痴呆”时，小助理不能：
+
+- 诊断妈妈；
+- 说“这可能就是阿尔茨海默”；
+- 直接建议吃药；
+- 直接说“带她去医院”而不理解关系阻力；
+- 只说“我理解你很担心”；
+- 马上转成提醒任务。
+
+---
+
+### 8.2 应该分 5 层处理
+
+```text
+第一层：接住重量
+第二层：澄清观察
+第三层：理解老人心理
+第四层：理解亲子关系
+第五层：形成行动计划
+```
+
+---
+
+### 8.3 第一轮推荐回复
+
+```text
+这句话背后其实挺重的。先别急着给妈妈下判断，我们可以一起把它拆清楚一点。
+
+你是从哪几件具体事情开始觉得不太对的？比如她是忘了刚说过的话、反复问同一件事、找不到东西、认错路，还是已经影响到吃药、做饭、出门这些日常事了？
+```
+
+---
+
+### 8.4 如果用户回答具体行为
+
+用户：
+
+```text
+她最近老是重复问我今天周几，昨天还差点忘了关火。
+```
+
+小助理应该：
+
+```text
+这就比“记性差一点”更值得认真记录了，尤其是忘关火这种和安全有关的事。
+
+我想再帮你分清两件事：这是最近突然变明显，还是慢慢累积的？另外，她自己发现这些变化时，是会害怕、嘴硬否认，还是完全没意识到？
+```
+
+---
+
+### 8.5 如果用户表达内疚
+
+用户：
+
+```text
+我也不知道是不是我太久没回家，所以才突然发现。
+```
+
+小助理应该：
+
+```text
+你这么想很正常，但先别把责任都揽到自己身上。很多变化确实是隔一阵子见面才会突然变明显。
+
+我更想帮你看清楚：妈妈的变化是“你最近才注意到”，还是身边人其实也早有感觉？你有没有问过邻居、亲戚，或者和她常接触的人？
+```
+
+---
+
+### 8.6 如果用户害怕和妈妈谈
+
+用户：
+
+```text
+我不敢跟她说，怕她觉得我嫌弃她。
+```
+
+小助理应该：
+
+```text
+这个担心很真实。很多老人听到“记性不好”“老年痴呆”会觉得自己被否定了，所以重点不是直接指出问题，而是换成“我想让你更安全、更省心”。
+
+比如你可以先不说“你是不是老年痴呆”，而是说：
+“妈，我最近有点担心你太累了。我们一起去做个体检，看看睡眠、血压、记忆这些有没有需要注意的地方。”
+
+我也可以帮你把这段话改成更像你平时会说的版本。
+```
+
+---
+
+## 9. Case Formulation Builder：形成“个案理解”
+
+### 9.1 为什么需要它
+
+如果每次都只是当下回复，Agent 永远不会变深。
+
+你需要把高价值话题变成一个持续追踪的 `care_case`。
+
+---
+
+### 9.2 care_case 数据结构
+
+```json
+{
+  "case_id": "case_001",
+  "case_type": "possible_cognitive_decline",
+  "elder_id": "elder_001",
+  "caregiver_id": "user_001",
+  "status": "open",
+  "summary": "用户担心妈妈出现认知下降，已提到重复问日期和忘关火。",
+  "known_facts": [
+    "妈妈最近反复问今天周几",
+    "昨天差点忘了关火"
+  ],
+  "unknowns": [
+    "变化持续多久",
+    "是否突然出现",
+    "是否影响吃药、出门、财务",
+    "妈妈本人是否意识到",
+    "是否有其他家属观察到"
+  ],
+  "risk_flags": [
+    {
+      "type": "home_safety",
+      "content": "忘记关火",
+      "level": "high"
+    }
+  ],
+  "relationship_context": {
+    "caregiver_fear": "担心妈妈觉得被嫌弃",
+    "elder_possible_emotion": "可能会否认或害怕"
+  },
+  "next_steps": [
+    "记录接下来一周的具体事件",
+    "温和建议做一次体检/认知评估",
+    "设置厨房安全提醒",
+    "准备和妈妈沟通的话术"
+  ],
+  "follow_up_at": "2026-06-15T20:00:00-07:00"
+}
+```
+
+---
+
+## 10. Insight Response：回复用户不能只是答复，要有洞察
+
+### 10.1 输出结构
+
+每次深度回复建议分成 4 段：
+
+```text
+1. 我听到的核心问题
+2. 我想帮你澄清的关键事实
+3. 这背后的关系/心理层面
+4. 一个温和的下一步
+```
+
+---
+
+### 10.2 示例
+
+用户：
+
+```text
+妈妈好像有一点老年痴呆。
+```
+
+优秀回复：
+
+```text
+这句话背后其实不只是“妈妈记性变差”，也可能是你开始意识到：她正在从一个照顾你的人，慢慢变成需要你多看顾的人。这种感觉会很复杂，担心、害怕、内疚可能都会有。
+
+但我们先不要急着给她贴标签。你可以先告诉我 2-3 个让你觉得不对劲的具体场景吗？
+
+比如：
+- 她是不是反复问同一个问题？
+- 有没有忘记吃药、关火、出门路线？
+- 这种变化是突然出现，还是这几个月慢慢变明显？
+
+我先帮你把这些现象整理成一份观察记录。后面如果需要，也可以帮你准备一段不伤她自尊的沟通话术。
+```
+
+---
+
+## 11. 主动 Hook 系统设计
+
+你说的“主动发消息”非常重要。它不能只是“定时提醒”，而是：
+
+```text
+事件触发 + 记忆触发 + 关系触发 + 时间触发 + 风险触发
+```
+
+---
+
+## 12. Hook 类型
+
+### 12.1 任务结束 Hook
+
+触发条件：
+
+```text
+老人电话结束 / 任务完成 / 任务异常 / 老人带话
+```
+
+示例：
+
+```text
+刚刚和奶奶通完电话。她说药吃了，但提到今天有点头晕。我建议你晚点不用聊太久，就问一句“头还晕不晕”，她会觉得你是真的记着。
+```
+
+---
+
+### 12.2 用户回访 Hook
+
+触发条件：
+
+```text
+用户 6 小时 / 24 小时后重新打开 App
+```
+
+示例：
+
+```text
+你昨天提到担心妈妈记性变差。我帮你留着这件事了。今天要不要先把最近发生的 2-3 个具体场景记下来？这样以后和医生或家人聊时不会只剩一个模糊的担心。
+```
+
+---
+
+### 12.3 未完成关怀 Hook
+
+触发条件：
+
+```text
+用户说想给老人打电话，但 24 小时内没有行动
+```
+
+示例：
+
+```text
+昨天你说有点担心妈妈，但可能还没来得及联系她。要不要我帮你写一句很轻的开场？不用直接说“记性”，可以从“最近睡得怎么样”开始。
+```
+
+---
+
+### 12.4 风险升级 Hook
+
+触发条件：
+
+```text
+老人多次提到头晕、忘关火、迷路、摔倒、用药混乱、夜间异常
+```
+
+示例：
+
+```text
+这周妈妈已经两次提到忘事影响到日常安全了。不是要吓你，但这件事值得认真记录一下。你可以考虑找一个她信任的人一起陪她做次检查。
+```
+
+---
+
+### 12.5 关系修复 Hook
+
+触发条件：
+
+```text
+用户和老人发生冲突 / 用户表达内疚 / 老人表达失落
+```
+
+示例：
+
+```text
+你上次说怕妈妈觉得你在嫌弃她。其实这类话题最难的不是事实，而是说法。要不要我帮你把“我担心你记性不好”换成更像关心、没那么刺耳的版本？
+```
+
+---
+
+### 12.6 节日 / 纪念日 Hook
+
+触发条件：
+
+```text
+生日、母亲节、父亲节、春节、中秋、忌日、复诊日、家族纪念日
+```
+
+示例：
+
+```text
+明天是中秋。你可以不用说很正式的话，给妈妈发一句“今天突然想起你做的月饼了”就够了。我可以帮你写得像你平时说话一点。
+```
+
+---
+
+### 12.7 长期未登录 Hook
+
+触发条件：
+
+```text
+用户 3-7 天未打开 App，但存在未处理照护 case
+```
+
+示例：
+
+```text
+这几天你可能挺忙。我帮你留意着妈妈记性这件事了。如果你愿意，今天只花 1 分钟记一条观察也可以，不用一下子处理完。
+```
+
+---
+
+## 13. Hook Engine 架构
+
+```mermaid
+flowchart TD
+A[Event Stream] --> B[Hook Candidate Generator]
+B --> C[Hook Relevance Scorer]
+C --> D[Safety & Intrusion Guard]
+D --> E{Send Now?}
+E -- Yes --> F[Message Realizer]
+F --> G[Send Notification / In-app Message]
+E -- No --> H[Queue / Snooze / Drop]
+G --> I[User Response]
+I --> J[Update Memory & Case]
+```
+
+---
+
+## 14. Hook 触发事件
+
+```json
+[
+  "task_completed",
+  "task_failed",
+  "elder_abnormal_response",
+  "elder_relay_message",
+  "caregiver_reopens_app",
+  "caregiver_inactive_6h",
+  "caregiver_inactive_24h",
+  "care_case_opened",
+  "care_case_unresolved_24h",
+  "festival_approaching",
+  "birthday_approaching",
+  "medical_appointment_approaching",
+  "repeated_symptom_detected",
+  "repeated_missed_task",
+  "relationship_conflict_detected",
+  "caregiver_burnout_signal"
+]
+```
+
+---
+
+## 15. Hook Scoring
+
+每个 hook 候选都要打分，避免骚扰。
+
+### 15.1 评分字段
+
+```json
+{
+  "importance": 0.9,
+  "timeliness": 0.8,
+  "relationship_value": 0.85,
+  "risk_level": 0.7,
+  "user_burden": 0.3,
+  "repetition_penalty": 0.2,
+  "intrusion_risk": 0.25,
+  "final_score": 0.78
+}
+```
+
+### 15.2 发送规则
+
+```text
+final_score >= 0.75：可主动发送
+0.55 <= final_score < 0.75：进入 App 内待处理，不推送
+final_score < 0.55：丢弃
+```
+
+### 15.3 限制规则
+
+```json
+{
+  "max_push_per_day": 2,
+  "max_sensitive_push_per_day": 1,
+  "quiet_hours": {
+    "start": "22:00",
+    "end": "08:00"
+  },
+  "same_case_cooldown_hours": 12,
+  "festival_hook_advance_days": 2
+}
+```
+
+---
+
+## 16. Hook Candidate Generator Prompt
+
+```text
+你是亲情关怀 Agent 的主动触达候选生成器。
+
+你的任务是根据事件、用户记忆、老人状态和未完成 case，判断是否应该生成一条主动消息。
+
+你不能为了活跃度而打扰用户。
+你只能在消息真的有帮助时生成 hook。
+
+请判断：
+1. 这件事是否值得主动提醒；
+2. 现在是不是合适时机；
+3. 用户可能需要的是安慰、追问、建议、行动提醒还是关系修复；
+4. 消息应该轻一点还是明确一点；
+5. 是否存在医疗、安全或情绪风险；
+6. 是否应该推送，还是只放在 App 内。
+
+输出 JSON。
+```
+
+### 输出示例
+
+```json
+{
+  "should_create_hook": true,
+  "hook_type": "care_case_follow_up",
+  "trigger_reason": "用户昨天提到担心妈妈认知下降，但尚未补充具体观察",
+  "user_need": "需要把模糊担忧转化为观察记录",
+  "suggested_timing": "next_app_open_or_24h",
+  "delivery_channel": "in_app_first",
+  "priority": "medium_high",
+  "message_goal": "温和邀请用户补充2-3个具体场景",
+  "risk_notes": [
+    "避免诊断",
+    "避免制造焦虑"
+  ]
+}
+```
+
+---
+
+## 17. Hook Message Realizer Prompt
+
+```text
+你是「突然有点惦记你们」的小助理。
+
+你要把一个主动触达 hook 写成自然、温柔、不打扰的消息。
+
+要求：
+- 不要像运营 push；
+- 不要像系统通知；
+- 不要制造内疚；
+- 不要显得监控用户；
+- 要像一个记得这件事的人；
+- 最好只推动一个很小的下一步；
+- 如果是敏感健康话题，要克制、稳重。
+
+输入：
+hook_type: {{hook_type}}
+trigger_reason: {{trigger_reason}}
+message_goal: {{message_goal}}
+case_summary: {{case_summary}}
+user_style: {{user_style}}
+
+输出一条 30-100 字的消息。
+```
+
+### 示例输出
+
+```text
+我还记得你昨天说有点担心妈妈记性这件事。先不用急着下判断，要不要今天先记 2 个具体场景？我可以帮你整理成一份不吓人的观察记录。
+```
+
+---
+
+## 18. 深度聊天后端 API
+
+### 18.1 用户发消息
+
+```http
+POST /api/companion/chat
+```
+
+请求：
+
+```json
+{
+  "user_id": "user_001",
+  "elder_id": "elder_001",
+  "message": "妈妈好像有一点老年痴呆。",
+  "thread_id": null
+}
+```
+
+响应：
+
+```json
+{
+  "reply": "这句话背后其实挺重的。先别急着给妈妈下判断，我们可以一起把它拆清楚一点。\n\n你是从哪几件具体事情开始觉得不太对的？比如她是忘了刚说过的话、反复问同一件事、找不到东西、认错路，还是已经影响到吃药、做饭、出门这些日常事了？",
+  "conversation_state": {
+    "thread_id": "thread_001",
+    "situation_type": "possible_cognitive_decline",
+    "stage": "initial_deepening",
+    "case_id": "case_001"
+  },
+  "suggested_actions": [
+    {
+      "type": "record_observation",
+      "label": "记录一个具体场景"
+    },
+    {
+      "type": "rewrite_message",
+      "label": "帮我想想怎么跟妈妈说"
+    }
+  ]
+}
+```
+
+---
+
+## 19. 新增数据库表
+
+### 19.1 care_cases
+
+```sql
+CREATE TABLE care_cases (
+  id UUID PRIMARY KEY,
+  family_id UUID NOT NULL,
+  elder_id UUID,
+  caregiver_id UUID NOT NULL,
+  case_type TEXT NOT NULL,
+  status TEXT DEFAULT 'open',
+  summary TEXT,
+  known_facts JSONB,
+  unknowns JSONB,
+  risk_flags JSONB,
+  relationship_context JSONB,
+  next_steps JSONB,
+  follow_up_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+---
+
+### 19.2 conversation_threads
+
+```sql
+CREATE TABLE conversation_threads (
+  id UUID PRIMARY KEY,
+  family_id UUID NOT NULL,
+  caregiver_id UUID NOT NULL,
+  elder_id UUID,
+  case_id UUID,
+  thread_type TEXT,
+  current_stage TEXT,
+  state JSONB,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+---
+
+### 19.3 hook_events
+
+```sql
+CREATE TABLE hook_events (
+  id UUID PRIMARY KEY,
+  family_id UUID NOT NULL,
+  event_type TEXT NOT NULL,
+  source_type TEXT,
+  source_id UUID,
+  payload JSONB,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+---
+
+### 19.4 hook_candidates
+
+```sql
+CREATE TABLE hook_candidates (
+  id UUID PRIMARY KEY,
+  family_id UUID NOT NULL,
+  caregiver_id UUID NOT NULL,
+  elder_id UUID,
+  case_id UUID,
+  hook_type TEXT NOT NULL,
+  trigger_reason TEXT,
+  message_goal TEXT,
+  score JSONB,
+  status TEXT DEFAULT 'pending',
+  scheduled_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+---
+
+### 19.5 proactive_messages
+
+```sql
+CREATE TABLE proactive_messages (
+  id UUID PRIMARY KEY,
+  family_id UUID NOT NULL,
+  caregiver_id UUID NOT NULL,
+  elder_id UUID,
+  case_id UUID,
+  hook_candidate_id UUID,
+  channel TEXT,
+  content TEXT NOT NULL,
+  status TEXT DEFAULT 'queued',
+  sent_at TIMESTAMP,
+  opened_at TIMESTAMP,
+  responded_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+---
+
+## 20. 深度对话状态机
+
+```mermaid
+stateDiagram-v2
+    [*] --> UserMessage
+    UserMessage --> SituationRecognition
+    SituationRecognition --> ShallowTaskIntent
+    SituationRecognition --> SensitiveDeepCareIntent
+
+    ShallowTaskIntent --> TaskCreation
+
+    SensitiveDeepCareIntent --> InitialHolding
+    InitialHolding --> TargetedProbing
+    TargetedProbing --> CaseFormulation
+    CaseFormulation --> StrategySuggestion
+    StrategySuggestion --> MemoryWrite
+    MemoryWrite --> HookScheduling
+    HookScheduling --> [*]
+```
+
+---
+
+## 21. 对话策略：什么时候追问，什么时候建议？
+
+### 21.1 追问优先
+
+如果用户输入模糊但敏感：
+
+```text
+妈妈好像有一点老年痴呆。
+爸爸最近怪怪的。
+奶奶好像越来越不爱说话。
+我感觉我妈在骗我说吃药了。
+```
+
+先追问，不要立刻建议。
+
+---
+
+### 21.2 建议优先
+
+如果用户已经给出明确事实且有风险：
+
+```text
+妈妈昨天忘了关火。
+爸爸今天出门迷路了。
+奶奶连续三天没吃药。
+外公摔倒了不肯告诉我。
+```
+
+先承认风险，再建议行动。
+
+---
+
+### 21.3 安抚优先
+
+如果用户明显崩溃：
+
+```text
+我真的撑不住了。
+我觉得我不是个好孩子。
+我不知道以后怎么办。
+```
+
+先稳住，再小步行动。
+
+---
+
+## 22. Safety Guard
+
+涉及疑似认知障碍、跌倒、用药、走失、意识混乱时，必须加 Safety Guard。
+
+### 22.1 禁止输出
+
+```text
+你妈妈应该是老年痴呆。
+```
+
+```text
+这应该没事。
+```
+
+```text
+不用去医院。
+```
+
+```text
+你必须马上把她送去医院。
+```
+
+### 22.2 推荐表达
+
+```text
+我不能判断这是不是认知障碍，但你提到的现象值得认真记录。尤其如果它已经影响到安全，比如忘关火、迷路、用药混乱，就建议尽快和家人一起安排专业评估。
+```
+
+---
+
+## 23. 端到端示例
+
+### 23.1 用户输入
+
+```text
+妈妈好像有一点老年痴呆。
+```
+
+### 23.2 小助理回复
+
+```text
+这句话背后其实挺重的。先别急着给妈妈下判断，我们可以一起把它拆清楚一点。
+
+你是从哪几件具体事情开始觉得不太对的？比如她是忘了刚说过的话、反复问同一件事、找不到东西、认错路，还是已经影响到吃药、做饭、出门这些日常事了？
+```
+
+---
+
+### 23.3 用户继续说
+
+```text
+她最近老是重复问我今天周几，昨天还差点忘了关火。
+```
+
+### 23.4 小助理继续深挖
+
+```text
+反复问日期可能只是记忆变差，但“忘关火”已经和安全有关了，这个值得认真记下来。
+
+我想再帮你分清两件事：这是最近突然变明显，还是这几个月慢慢累积的？另外，妈妈自己发现这些变化时，是会害怕、否认，还是完全没意识到？
+```
+
+---
+
+### 23.5 用户说
+
+```text
+我不敢说，怕她觉得我嫌弃她。
+```
+
+### 23.6 小助理给关系洞察
+
+```text
+你怕的其实不是“提醒她”这件事，而是怕她听成“我老了、没用了、被孩子嫌弃了”。这个担心很重要。
+
+所以不要从“你是不是记性不好”开口，可以换成“我想让你更安全、更省心”。
+
+比如你可以说：
+“妈，我最近有点担心你太累了。我们一起去做个体检，看看睡眠、血压、记忆这些有没有需要注意的地方。不是说你有问题，是我想心里踏实一点。”
+
+如果你愿意，我可以帮你把这段话改得更像你平时说话。
+```
+
+---
+
+### 23.7 24 小时后 Hook
+
+```text
+我还记得你昨天说担心妈妈记性这件事。先不用急着下判断，要不要今天先记 2 个具体场景？尤其是和安全有关的，比如关火、出门、吃药。我可以帮你整理成一份之后跟家人或医生沟通时能用的观察记录。
+```
+
+---
+
+## 24. MVP 实现优先级
+
+### P0：必须先做
+
+1. Situation Recognizer  
+2. Depth Planner  
+3. Probe Generator  
+4. care_cases 表  
+5. Hook Events  
+6. Hook Candidate Generator  
+7. Hook Scoring  
+8. Proactive Message Queue  
+
+---
+
+### P1：第二阶段
+
+1. 关系记忆长期沉淀；
+2. 节日/纪念日 Hook；
+3. 用户重回 App 场景化欢迎；
+4. 老人异常信号自动创建 case；
+5. 自动生成沟通话术；
+6. 多轮 case follow-up。
+
+---
+
+## 25. 给 AI 编程助手的实现提示词
+
+```text
+请基于《突然有点惦记你们_深度对话与主动Hook_Agent设计文档》重构我的小助理聊天后端。
+
+当前问题：
+小助理只会机械共情，用户说“妈妈好像有一点老年痴呆”，它只会说“听起来你很担心”，然后跳到提醒任务。这是不够的。
+
+目标：
+实现 Deep Relational Care Agent，使小助理具备深度对话、主动追问、关系洞察和主动 Hook 能力。
+
+技术栈：
+- Node.js + NestJS
+- PostgreSQL + Prisma
+- Redis + BullMQ
+- LLM Provider 抽象
+- 所有 Agent 输出结构化 JSON
+
+必须实现模块：
+1. SituationRecognizerAgent
+2. DepthPlannerAgent
+3. ProbeGeneratorAgent
+4. CaseFormulationBuilder
+5. MemoryCuratorAgent
+6. HookCandidateGenerator
+7. HookRelevanceScorer
+8. HookMessageRealizer
+9. SafetyGuardAgent
+
+必须新增表：
+1. care_cases
+2. conversation_threads
+3. hook_events
+4. hook_candidates
+5. proactive_messages
+
+核心 API：
+1. POST /api/companion/chat
+2. POST /api/hooks/events
+3. GET /api/proactive-messages
+4. POST /api/proactive-messages/:id/respond
+
+关键行为：
+- 用户输入敏感照护话题时，不要只共情，要主动深挖。
+- 每次最多问 2-3 个问题。
+- 先问具体事实，再理解情绪和关系。
+- 涉及医疗或认知下降时，不能诊断。
+- 要能创建 care_case 并后续主动跟进。
+- 主动消息不能像运营 push，要像一个记得这件事的人。
+- 主动 Hook 必须经过 relevance scoring 和 safety guard。
+
+示例：
+用户输入：“妈妈好像有一点老年痴呆。”
+
+错误回复：
+“听起来你很担心，我可以帮你提醒妈妈。”
+
+正确回复：
+“这句话背后其实挺重的。先别急着给妈妈下判断，我们可以一起把它拆清楚一点。你是从哪几件具体事情开始觉得不太对的？比如她是忘了刚说过的话、反复问同一件事、找不到东西、认错路，还是已经影响到吃药、做饭、出门这些日常事了？”
+```
+
+---
+
+## 26. 一句话总结
+
+你现在要改的不是“让 AI 更会安慰”，而是让它具备：
+
+```text
+情境识别
++ 深度追问
++ 个案建模
++ 关系洞察
++ 主动 Hook
++ 长期记忆
+```
+
+这样它才会从：
+
+```text
+机械共情的提醒助手
+```
+
+变成：
+
+```text
+真正像人一样记得、追问、理解、提醒和陪你处理家庭照护难题的亲情中介小助理。
+```
