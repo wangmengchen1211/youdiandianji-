@@ -798,9 +798,20 @@ async function handleStart(body: Record<string, unknown>) {
   const caregiverId = rawCaregiverId ? resolveCaregiverId(rawCaregiverId) : undefined;
 
   // 服务端查库锁定 elder 上下文
-  const elderRecord = store.getElder(elderId);
+  let elderRecord = store.getElder(elderId);
   if (!elderRecord) {
-    return NextResponse.json({ error: "Elder not found." }, { status: 404 });
+    // T0 修复：elderId 不在 store 中时（如前端动态生成的 elder_YD-XXXX），
+    // 兑底使用 store 中第一个可用的 elder。Vercel 无状态环境下避免 404 导致整个通话失败。
+    const fallback = store.getElders()[0];
+    if (fallback) {
+      console.warn("[elder-call-conversation][start] elderId 在 store 中找不到，兑底使用第一个 elder", {
+        requestedElderId: elderId,
+        fallbackElderId: fallback.id,
+      });
+      elderRecord = fallback;
+    } else {
+      return NextResponse.json({ error: "Elder not found." }, { status: 404 });
+    }
   }
 
   // 构建 LockedElderContext
