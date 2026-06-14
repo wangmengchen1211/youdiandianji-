@@ -230,12 +230,36 @@ type StoredState = {
   callInsights: CallInsight[];
 };
 
-// ─── 身份锁定模型（2025-01新增）─────────────────────────────
+// ─── 身份锁定模型（2025-01新增）─────────────────────────────────
 // 目的：统一「谁在用、以谁的身份调用」，避免「奶奶/妈妈」称呼错乱。
 // 持久化 key 与业务数据独立，不受 MEM_DATA_VERSION 重置影响。
 type Identity = {
   role: "child" | "elder";
   personId: string; // child → caregiverId；elder → elderId
+  phone?: string;    // 手机号登录
+  userId?: string;   // 身份ID（用于绑定）
+  displayName?: string; // 登录时填写的称呼
+};
+
+// ─── 用户账号与绑定系统（手机号登录 + ID绑定）──────────────────────
+type UserAccount = {
+  userId: string;
+  phone: string;
+  role: "child" | "elder";
+  displayName: string;
+  boundPartnerId?: string;
+  boundPartnerName?: string;
+  createdAt: string;
+};
+
+type BindingRequest = {
+  id: string;
+  fromUserId: string;
+  fromDisplayName: string;
+  fromRole: "child" | "elder";
+  toUserId: string;
+  status: "pending" | "approved" | "rejected";
+  createdAt: string;
 };
 
 type Caregiver = {
@@ -247,6 +271,46 @@ type Caregiver = {
 const STORAGE_KEY = "you-dian-dian-ji-demo";
 const MEM_DATA_VERSION = "v7_conversational_call";
 const IDENTITY_KEY = "memory_bridge_identity_v1";
+const USERS_REGISTRY_KEY = "yddj_users_registry";
+const BINDING_REQUESTS_KEY = "yddj_binding_requests";
+
+// 根据手机号生成身份ID（取后4位 + 前缀）
+function generateUserId(phone: string): string {
+  const digits = phone.replace(/\D/g, "").slice(-4);
+  return `YD-${digits || "0000"}`;
+}
+
+// 用户注册表操作（模拟后端）
+function loadUsersRegistry(): Record<string, UserAccount> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(USERS_REGISTRY_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveUsersRegistry(registry: Record<string, UserAccount>): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(USERS_REGISTRY_KEY, JSON.stringify(registry));
+}
+
+// 绑定请求操作
+function loadBindingRequests(): BindingRequest[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(BINDING_REQUESTS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveBindingRequests(requests: BindingRequest[]): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(BINDING_REQUESTS_KEY, JSON.stringify(requests));
+}
 
 // Demo 阶段只有「小雨」一位子女；后续多人可扩充
 const CAREGIVERS: Caregiver[] = [
@@ -1035,10 +1099,19 @@ export default function HomePage() {
   const [userMode, setUserMode] = useState<UserMode | null>(null);
   // 身份锁定：选过身份后下次进来不需要重选
   const [identity, setIdentity] = useState<Identity | null>(null);
-  // 登录页内部步骤：null/'role' 选角色，'child'/'elder' 选具体人
-  const [loginStep, setLoginStep] = useState<"role" | "child" | "elder">("role");
+  // 登录页内部步骤：'phone' 输入手机号，'info' 填写信息选角色
+  const [loginStep, setLoginStep] = useState<"phone" | "info">("phone");
   // 右上角“我的身份”卡是否展开
   const [identityCardOpen, setIdentityCardOpen] = useState(false);
+  // 手机号登录表单
+  const [loginPhone, setLoginPhone] = useState("");
+  const [loginName, setLoginName] = useState("");
+  const [loginRole, setLoginRole] = useState<"child" | "elder">("child");
+  // 绑定系统
+  const [bindingInputId, setBindingInputId] = useState("");
+  const [bindingRequests, setBindingRequests] = useState<BindingRequest[]>([]);
+  const [myAccount, setMyAccount] = useState<UserAccount | null>(null);
+  const [bindingToast, setBindingToast] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("home");
   const [isPeopleDrawerOpen, setIsPeopleDrawerOpen] = useState(false);
   const [elders, setElders] = useState<Elder[]>([]);
@@ -1335,6 +1408,16 @@ export default function HomePage() {
       if (next.role === "elder") {
         setCurrentElderId(next.personId);
       }
+      // 加载用户账号信息和绑定请求
+      if (next.userId) {
+        const registry = loadUsersRegistry();
+        const account = registry[next.userId];
+        if (account) setMyAccount(account);
+        const allRequests = loadBindingRequests();
+        setBindingRequests(allRequests.filter(
+          (r) => r.toUserId === next.userId || r.fromUserId === next.userId,
+        ));
+      }
     } else {
       // 没有身份 → 强制走登录页，避免被 demo.userMode 默认 "child" 覆盖
       setUserMode(null);
@@ -1371,11 +1454,171 @@ export default function HomePage() {
     }
   }, []);
 
+  // 手机号登录
+  const loginWithPhone = useCallback(() => {
+    const phone = loginPhone.trim();
+    const name = loginName.trim();
+    if (!phone || !name) return;
+
+    const userId = generateUserId(phone);
+    const role = loginRole;
+
+    // 注册/更新用户账号（模拟后端）
+    const registry = loadUsersRegistry();
+    const account: UserAccount = {
+      userId,
+      phone,
+      role,
+      displayName: name,
+      boundPartnerId: registry[userId]?.boundPartnerId,
+      boundPartnerName: registry[userId]?.boundPartnerName,
+      createdAt: registry[userId]?.createdAt ?? nowLabel(),
+    };
+    registry[userId] = account;
+    saveUsersRegistry(registry);
+    setMyAccount(account);
+
+    // 同步 identity
+    const personId = role === "child" ? `user_${userId}` : `elder_${userId}`;
+    const next: Identity = { role, personId, phone, userId, displayName: name };
+    setIdentity(next);
+    setUserMode(role);
+
+    // 加载与此用户相关的绑定请求
+    const allRequests = loadBindingRequests();
+    const myRequests = allRequests.filter(
+      (r) => r.toUserId === userId || r.fromUserId === userId,
+    );
+    setBindingRequests(myRequests);
+  }, [loginPhone, loginName, loginRole]);
+
+  // 刷新当前用户的账号信息和绑定请求
+  const refreshAccountInfo = useCallback(() => {
+    if (!identity?.userId) return;
+    const registry = loadUsersRegistry();
+    const account = registry[identity.userId];
+    if (account) setMyAccount(account);
+    const allRequests = loadBindingRequests();
+    const myRequests = allRequests.filter(
+      (r) => r.toUserId === identity.userId || r.fromUserId === identity.userId,
+    );
+    setBindingRequests(myRequests);
+  }, [identity?.userId]);
+
+  // 发送绑定请求
+  const sendBindingRequest = useCallback(() => {
+    const targetId = bindingInputId.trim().toUpperCase();
+    if (!targetId || !identity?.userId) return;
+
+    if (targetId === identity.userId) {
+      setBindingToast("不能绑定自己哦~");
+      setTimeout(() => setBindingToast(null), 2500);
+      return;
+    }
+
+    // 检查是否已绑定
+    if (myAccount?.boundPartnerId === targetId) {
+      setBindingToast("已经绑定过了~");
+      setTimeout(() => setBindingToast(null), 2500);
+      return;
+    }
+
+    // 检查目标用户是否注册
+    const registry = loadUsersRegistry();
+    if (!registry[targetId]) {
+      setBindingToast(`未找到ID为 ${targetId} 的用户，请确认对方已注册`);
+      setTimeout(() => setBindingToast(null), 3000);
+      return;
+    }
+
+    // 检查是否已有 pending 请求
+    const allRequests = loadBindingRequests();
+    const existing = allRequests.find(
+      (r) => r.fromUserId === identity.userId && r.toUserId === targetId && r.status === "pending",
+    );
+    if (existing) {
+      setBindingToast("已发送过请求，正在等待对方确认~");
+      setTimeout(() => setBindingToast(null), 2500);
+      return;
+    }
+
+    // 创建请求
+    const newRequest: BindingRequest = {
+      id: uid("bind"),
+      fromUserId: identity.userId,
+      fromDisplayName: identity.displayName ?? "",
+      fromRole: identity.role,
+      toUserId: targetId,
+      status: "pending",
+      createdAt: nowLabel(),
+    };
+    allRequests.push(newRequest);
+    saveBindingRequests(allRequests);
+
+    setBindingRequests(allRequests.filter(
+      (r) => r.toUserId === identity.userId || r.fromUserId === identity.userId,
+    ));
+    setBindingInputId("");
+    setBindingToast(`绑定请求已发送给 ${targetId}，等对方通过即可绑定~`);
+    setTimeout(() => setBindingToast(null), 3000);
+  }, [bindingInputId, identity, myAccount]);
+
+  // 同意绑定请求
+  const approveBinding = useCallback((requestId: string) => {
+    if (!identity?.userId) return;
+    const allRequests = loadBindingRequests();
+    const req = allRequests.find((r) => r.id === requestId);
+    if (!req || req.toUserId !== identity.userId) return;
+
+    // 更新请求状态
+    req.status = "approved";
+    saveBindingRequests(allRequests);
+
+    // 双向绑定
+    const registry = loadUsersRegistry();
+    const myAcc = registry[identity.userId];
+    const partnerAcc = registry[req.fromUserId];
+    if (myAcc) {
+      myAcc.boundPartnerId = req.fromUserId;
+      myAcc.boundPartnerName = req.fromDisplayName;
+      registry[identity.userId] = myAcc;
+    }
+    if (partnerAcc) {
+      partnerAcc.boundPartnerId = identity.userId;
+      partnerAcc.boundPartnerName = identity.displayName ?? "";
+      registry[req.fromUserId] = partnerAcc;
+    }
+    saveUsersRegistry(registry);
+
+    refreshAccountInfo();
+    setBindingToast(`已通过 ${req.fromDisplayName} 的绑定请求，现在可以互动了~`);
+    setTimeout(() => setBindingToast(null), 3000);
+  }, [identity, refreshAccountInfo]);
+
+  // 拒绝绑定请求
+  const rejectBinding = useCallback((requestId: string) => {
+    if (!identity?.userId) return;
+    const allRequests = loadBindingRequests();
+    const req = allRequests.find((r) => r.id === requestId);
+    if (!req || req.toUserId !== identity.userId) return;
+
+    req.status = "rejected";
+    saveBindingRequests(allRequests);
+    refreshAccountInfo();
+    setBindingToast("已拒绝绑定请求");
+    setTimeout(() => setBindingToast(null), 2500);
+  }, [identity, refreshAccountInfo]);
+
   // 退出身份 / 重选
   const clearIdentity = useCallback(() => {
     setIdentity(null);
     setUserMode(null);
-    setLoginStep("role");
+    setMyAccount(null);
+    setBindingRequests([]);
+    setBindingInputId("");
+    setLoginPhone("");
+    setLoginName("");
+    setLoginStep("phone");
     if (typeof window !== "undefined") {
       try {
         const url = new URL(window.location.href);
@@ -2839,115 +3082,107 @@ export default function HomePage() {
     return (
       <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-4 py-8 sm:px-5 sm:py-10">
         <div className="rounded-[28px] border border-orange-100 bg-white p-6 shadow-[0_20px_60px_rgba(242,153,110,0.15)]">
-          {/* 第一阶段：选角色 */}
-          {loginStep === "role" && (
+          {/* 第一阶段：输入手机号 */}
+          {loginStep === "phone" && (
             <>
               <div className="mb-6">
                 <p className="text-sm font-medium text-orange-500">突然有点惦记你们</p>
-                <h1 className="mt-2 text-2xl font-semibold text-stone-800">先选择你的身份</h1>
+                <h1 className="mt-2 text-2xl font-semibold text-stone-800">手机号登录</h1>
                 <p className="mt-2 text-sm leading-6 text-stone-500">
-                  选完会记住你的身份，下次进来不用重选。子女端发起惦记与查看回执；长辈端保留念念聊天、电话提醒与反馈。
+                  输入你的手机号即可登录，登录后可在「我的」里绑定家人，绑定成功就能端对端连接。
                 </p>
               </div>
-              <div className="space-y-3">
+              <div className="space-y-4">
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-stone-400">手机号</label>
+                  <input
+                    type="tel"
+                    inputMode="numeric"
+                    maxLength={11}
+                    value={loginPhone}
+                    onChange={(e) => setLoginPhone(e.target.value.replace(/\D/g, ""))}
+                    placeholder="请输入手机号"
+                    className="min-h-12 w-full rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 text-base text-stone-800 outline-none transition-colors focus:border-[#F2996E] focus:bg-white"
+                  />
+                </div>
                 <button
                   type="button"
-                  onClick={() => setLoginStep("child")}
-                  className="min-h-14 w-full rounded-2xl bg-[#F2996E] px-4 py-3 text-base font-medium text-white"
+                  disabled={loginPhone.length < 11}
+                  onClick={() => setLoginStep("info")}
+                  className="min-h-12 w-full rounded-2xl bg-[#F2996E] px-4 py-3 text-base font-medium text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  我是子女
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setLoginStep("elder")}
-                  className="min-h-14 w-full rounded-2xl bg-[#FFF1C7] px-4 py-3 text-base font-medium text-stone-700"
-                >
-                  我是长辈
+                  下一步
                 </button>
               </div>
             </>
           )}
 
-          {/* 第二阶段：子女选具体人 */}
-          {loginStep === "child" && (
+          {/* 第二阶段：填写信息 + 选角色 */}
+          {loginStep === "info" && (
             <>
               <div className="mb-4">
                 <button
                   type="button"
-                  onClick={() => setLoginStep("role")}
+                  onClick={() => setLoginStep("phone")}
                   className="text-xs text-stone-400"
                 >
                   ← 返回
                 </button>
-                <h1 className="mt-2 text-xl font-semibold text-stone-800">选择你是哪位子女</h1>
-                <p className="mt-1 text-xs text-stone-400">选中后念念会以这个身份跟长辈对话。</p>
+                <h1 className="mt-2 text-xl font-semibold text-stone-800">完善信息</h1>
+                <p className="mt-1 text-xs text-stone-400">你的身份ID将自动生成，登录后可在「我的」里查看和绑定家人。</p>
               </div>
-              <div className="space-y-2">
-                {CAREGIVERS.map((c) => (
-                  <button
-                    key={c.id}
-                    type="button"
-                    onClick={() => selectIdentity("child", c.id)}
-                    className="flex w-full items-center gap-3 rounded-2xl border border-stone-100 bg-white px-4 py-3 text-left transition-colors hover:bg-orange-50"
-                  >
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#F2996E] text-sm font-medium text-white">
-                      {c.displayName.slice(0, 1)}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-stone-700">{c.displayName}</p>
-                      <p className="text-xs text-stone-400">{c.relation}</p>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-
-          {/* 第二阶段：长辈选具体人 */}
-          {loginStep === "elder" && (
-            <>
-              <div className="mb-4">
-                <button
-                  type="button"
-                  onClick={() => setLoginStep("role")}
-                  className="text-xs text-stone-400"
-                >
-                  ← 返回
-                </button>
-                <h1 className="mt-2 text-xl font-semibold text-stone-800">选择你是哪位长辈</h1>
-                <p className="mt-1 text-xs text-stone-400">选中后念念会以这个身份称呼你。</p>
-              </div>
-              {elders.length > 0 ? (
-                <div className="space-y-2">
-                  {elders.map((e) => (
+              <div className="space-y-4">
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-stone-400">你的称呼</label>
+                  <input
+                    type="text"
+                    value={loginName}
+                    onChange={(e) => setLoginName(e.target.value)}
+                    placeholder="如：小雨 / 妈妈"
+                    maxLength={10}
+                    className="min-h-12 w-full rounded-2xl border border-stone-200 bg-stone-50 px-4 py-3 text-base text-stone-800 outline-none transition-colors focus:border-[#F2996E] focus:bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-stone-400">选择身份</label>
+                  <div className="grid grid-cols-2 gap-3">
                     <button
-                      key={e.id}
                       type="button"
-                      onClick={() => selectIdentity("elder", e.id)}
-                      className="flex w-full items-center gap-3 rounded-2xl border border-stone-100 bg-white px-4 py-3 text-left transition-colors hover:bg-amber-50"
+                      onClick={() => setLoginRole("child")}
+                      className={`min-h-14 rounded-2xl px-4 py-3 text-base font-medium transition-all ${
+                        loginRole === "child"
+                          ? "bg-[#F2996E] text-white shadow-md"
+                          : "bg-stone-50 text-stone-500"
+                      }`}
                     >
-                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#FFF1C7] text-sm font-medium text-stone-700">
-                        {e.displayName.slice(0, 1)}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-medium text-stone-700">{e.displayName}</p>
-                        <p className="text-xs text-stone-400">{e.relation}</p>
-                      </div>
+                      我是子女
                     </button>
-                  ))}
+                    <button
+                      type="button"
+                      onClick={() => setLoginRole("elder")}
+                      className={`min-h-14 rounded-2xl px-4 py-3 text-base font-medium transition-all ${
+                        loginRole === "elder"
+                          ? "bg-[#F2996E] text-white shadow-md"
+                          : "bg-stone-50 text-stone-500"
+                      }`}
+                    >
+                      我是长辈
+                    </button>
+                  </div>
                 </div>
-              ) : (
-                <div className="rounded-2xl bg-stone-50 p-4 text-sm text-stone-500">
-                  <p>还没有绑定长辈档案。</p>
-                  <button
-                    type="button"
-                    onClick={() => selectIdentity("child", "user_xiaoyu")}
-                    className="mt-3 min-h-10 rounded-full bg-[#F2996E] px-4 py-2 text-xs text-white"
-                  >
-                    先作为子女进入添加长辈
-                  </button>
+                <div className="rounded-2xl bg-orange-50 px-4 py-3">
+                  <p className="text-xs text-stone-400">你的身份ID</p>
+                  <p className="mt-0.5 text-sm font-semibold text-[#F2996E]">{generateUserId(loginPhone)}</p>
                 </div>
-              )}
+                <button
+                  type="button"
+                  disabled={!loginName.trim()}
+                  onClick={loginWithPhone}
+                  className="min-h-12 w-full rounded-2xl bg-[#F2996E] px-4 py-3 text-base font-medium text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  登录
+                </button>
+              </div>
             </>
           )}
         </div>
@@ -3451,12 +3686,15 @@ export default function HomePage() {
             </div>
             <button
               type="button"
-              onClick={() => setIdentityCardOpen(true)}
+              onClick={() => {
+                setIdentityCardOpen(true);
+                refreshAccountInfo();
+              }}
               className="flex h-9 w-9 items-center justify-center rounded-full bg-[#FFF1C7] text-sm font-medium text-stone-700 shadow-sm transition-transform hover:scale-105"
               aria-label="我的身份"
-              title={currentElder?.displayName ?? "我的身份"}
+              title={identity?.displayName ?? currentElder?.displayName ?? "我的身份"}
             >
-              {(currentElder?.displayName ?? "长").slice(0, 1)}
+              {(identity?.displayName ?? currentElder?.displayName ?? "长").slice(0, 1)}
             </button>
           </div>
 
@@ -3596,6 +3834,182 @@ export default function HomePage() {
             </div>
           </div>
         </section>
+
+        {/* ─── 身份卡片（手机号登录 + ID绑定）────────────────────── */}
+        {identityCardOpen && identity && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 p-4 backdrop-blur-[2px]"
+            onClick={() => setIdentityCardOpen(false)}
+          >
+            <div
+              className="max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-[28px] border border-orange-100 bg-white p-5 shadow-[0_18px_50px_rgba(47,41,36,0.16)]"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-center gap-3">
+                <div
+                  className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-base font-semibold shadow-sm ${
+                    identity.role === "child" ? "bg-[#F2996E] text-white" : "bg-[#FFF1C7] text-stone-700"
+                  }`}
+                >
+                  {(identity.displayName ?? "我").slice(0, 1)}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-base font-semibold text-stone-800">{identity.displayName ?? "我"}</p>
+                  <p className="mt-0.5 text-xs text-stone-400">
+                    {identity.role === "child" ? "子女身份" : "长辈身份"}
+                    {identity.phone ? ` · ${identity.phone}` : ""}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIdentityCardOpen(false)}
+                  className="min-h-8 rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-500 transition-colors hover:bg-stone-200"
+                >
+                  关闭
+                </button>
+              </div>
+
+              <div className="mt-4 flex items-center justify-between rounded-2xl bg-orange-50 px-4 py-3">
+                <div>
+                  <p className="text-xs text-stone-400">我的身份ID</p>
+                  <p className="mt-0.5 text-sm font-bold tracking-wider text-[#F2996E]">{identity.userId ?? "—"}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (identity.userId) {
+                      navigator.clipboard?.writeText(identity.userId).then(
+                        () => { setBindingToast("ID已复制到剪贴板"); setTimeout(() => setBindingToast(null), 2000); },
+                        () => {},
+                      );
+                    }
+                  }}
+                  className="min-h-8 rounded-full bg-white px-3 py-1 text-xs text-stone-500 shadow-sm transition-colors hover:bg-stone-50"
+                >
+                  复制
+                </button>
+              </div>
+
+              {bindingToast && (
+                <div className="mt-3 rounded-2xl bg-emerald-50 px-4 py-2.5 text-center text-xs text-emerald-600">
+                  {bindingToast}
+                </div>
+              )}
+
+              {myAccount?.boundPartnerId && (
+                <div className="mt-4">
+                  <p className="text-xs font-medium text-stone-400">
+                    ✓ 已绑定的{identity.role === "child" ? "长辈" : "子女"}
+                  </p>
+                  <div className="mt-2 flex items-center gap-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-3 py-2">
+                    <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-medium ${identity.role === "child" ? "bg-[#FFF1C7] text-stone-700" : "bg-[#F2996E] text-white"}`}>
+                      {(myAccount.boundPartnerName ?? "?").slice(0, 1)}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-stone-700">{myAccount.boundPartnerName ?? "家人"}</p>
+                      <p className="text-xs text-emerald-500">{myAccount.boundPartnerId} · 已连接</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {!myAccount?.boundPartnerId && (
+                <div className="mt-4">
+                  <p className="text-xs font-medium text-stone-400">
+                    {identity.role === "child" ? "📌 添加长辈ID" : "📎 添加子女ID"}
+                  </p>
+                  <p className="mt-1 text-[11px] text-stone-300">输入对方的身份ID，发送请求等对方通过即可绑定</p>
+                  <div className="mt-2 flex gap-2">
+                    <input
+                      type="text"
+                      value={bindingInputId}
+                      onChange={(e) => setBindingInputId(e.target.value.toUpperCase())}
+                      placeholder="如 YD-1234"
+                      maxLength={10}
+                      className="min-h-10 flex-1 rounded-full border border-stone-200 bg-stone-50 px-4 py-2 text-sm text-stone-800 outline-none transition-colors focus:border-[#F2996E] focus:bg-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={sendBindingRequest}
+                      disabled={!bindingInputId.trim()}
+                      className="min-h-10 shrink-0 rounded-full bg-[#F2996E] px-4 py-2 text-sm font-medium text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      发送
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {bindingRequests.filter((r) => r.toUserId === identity.userId && r.status === "pending").length > 0 && (
+                <div className="mt-4">
+                  <p className="text-xs font-medium text-stone-400">🔔 收到的绑定请求</p>
+                  <div className="mt-2 space-y-2">
+                    {bindingRequests
+                      .filter((r) => r.toUserId === identity.userId && r.status === "pending")
+                      .map((req) => (
+                        <div key={req.id} className="flex items-center gap-3 rounded-2xl border border-orange-100 bg-orange-50/50 px-3 py-2">
+                          <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-medium ${req.fromRole === "child" ? "bg-[#F2996E] text-white" : "bg-[#FFF1C7] text-stone-700"}`}>
+                            {req.fromDisplayName.slice(0, 1)}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium text-stone-700">{req.fromDisplayName}</p>
+                            <p className="text-xs text-stone-400">{req.fromUserId} 想绑定你</p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => approveBinding(req.id)}
+                            className="min-h-8 shrink-0 rounded-full bg-[#F2996E] px-3 py-1 text-xs font-medium text-white"
+                          >
+                            通过
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => rejectBinding(req.id)}
+                            className="min-h-8 shrink-0 rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-500"
+                          >
+                            拒绝
+                          </button>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+
+              {bindingRequests.filter((r) => r.fromUserId === identity.userId && r.status === "pending").length > 0 && (
+                <div className="mt-4">
+                  <p className="text-xs font-medium text-stone-400">⏳ 已发送的请求</p>
+                  <div className="mt-2 space-y-2">
+                    {bindingRequests
+                      .filter((r) => r.fromUserId === identity.userId && r.status === "pending")
+                      .map((req) => (
+                        <div key={req.id} className="flex items-center gap-3 rounded-2xl border border-stone-100 bg-stone-50 px-3 py-2">
+                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-stone-200 text-sm font-medium text-stone-500">?</div>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm text-stone-600">{req.toUserId}</p>
+                            <p className="text-xs text-stone-400">等待对方确认...</p>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-5 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIdentityCardOpen(false);
+                    clearIdentity();
+                  }}
+                  className="min-h-10 flex-1 rounded-full bg-[#F2996E] px-4 py-2 text-sm font-medium text-white"
+                >
+                  切换身份
+                </button>
+              </div>
+              <p className="mt-2 text-center text-[11px] text-stone-300">身份已记住在本设备，下次进来不用重选</p>
+            </div>
+          </div>
+        )}
       </main>
     );
   }
@@ -3646,14 +4060,14 @@ export default function HomePage() {
       {/* ─── Agent Call Modal 已删除（2025-01）────────────────────────── */}
       {/* 合并到 elder-call-conversation（openCall + CallSession）作为唯一通话入口，避免「奶奶/妈妈」称呼错乱 */}
 
-      {/* ─── 右上角「我的身份」轻量绑定卡（2025-01新增）────────────────────── */}
+      {/* ─── 右上角「我的身份」卡片（手机号登录 + ID绑定）────────────────────── */}
       {identityCardOpen && identity && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 p-4 backdrop-blur-[2px]"
           onClick={() => setIdentityCardOpen(false)}
         >
           <div
-            className="w-full max-w-sm rounded-[28px] border border-orange-100 bg-white p-5 shadow-[0_18px_50px_rgba(47,41,36,0.16)]"
+            className="max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-[28px] border border-orange-100 bg-white p-5 shadow-[0_18px_50px_rgba(47,41,36,0.16)]"
             onClick={(event) => event.stopPropagation()}
           >
             {/* 当前身份 */}
@@ -3663,19 +4077,15 @@ export default function HomePage() {
                   identity.role === "child" ? "bg-[#F2996E] text-white" : "bg-[#FFF1C7] text-stone-700"
                 }`}
               >
-                {(identity.role === "child"
-                  ? CAREGIVERS.find((c) => c.id === identity.personId)?.displayName ?? "我"
-                  : elders.find((e) => e.id === identity.personId)?.displayName ?? "长"
-                ).slice(0, 1)}
+                {(identity.displayName ?? "我").slice(0, 1)}
               </div>
               <div className="min-w-0 flex-1">
                 <p className="text-base font-semibold text-stone-800">
-                  {identity.role === "child"
-                    ? CAREGIVERS.find((c) => c.id === identity.personId)?.displayName ?? "未知子女"
-                    : elders.find((e) => e.id === identity.personId)?.displayName ?? "未知长辈"}
+                  {identity.displayName ?? "我"}
                 </p>
                 <p className="mt-0.5 text-xs text-stone-400">
                   {identity.role === "child" ? "子女身份" : "长辈身份"}
+                  {identity.phone ? ` · ${identity.phone}` : ""}
                 </p>
               </div>
               <button
@@ -3687,49 +4097,138 @@ export default function HomePage() {
               </button>
             </div>
 
-            {/* 我的家人 */}
-            <div className="mt-5">
-              <p className="text-xs font-medium text-stone-400">
-                {identity.role === "child" ? "📌 我惦记的长辈" : "📎 惦记我的子女"}
-              </p>
-              <div className="mt-2 space-y-2">
-                {identity.role === "child" ? (
-                  elders.length > 0 ? (
-                    elders.map((e) => (
-                      <div
-                        key={e.id}
-                        className="flex items-center gap-3 rounded-2xl border border-stone-100 bg-stone-50 px-3 py-2"
-                      >
-                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#FFF1C7] text-sm font-medium text-stone-700">
-                          {e.displayName.slice(0, 1)}
+            {/* 身份ID展示 */}
+            <div className="mt-4 flex items-center justify-between rounded-2xl bg-orange-50 px-4 py-3">
+              <div>
+                <p className="text-xs text-stone-400">我的身份ID</p>
+                <p className="mt-0.5 text-sm font-bold tracking-wider text-[#F2996E]">{identity.userId ?? "—"}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (identity.userId) {
+                    navigator.clipboard?.writeText(identity.userId).then(
+                      () => { setBindingToast("ID已复制到剪贴板"); setTimeout(() => setBindingToast(null), 2000); },
+                      () => {},
+                    );
+                  }
+                }}
+                className="min-h-8 rounded-full bg-white px-3 py-1 text-xs text-stone-500 shadow-sm transition-colors hover:bg-stone-50"
+              >
+                复制
+              </button>
+            </div>
+
+            {/* 绑定提示 toast */}
+            {bindingToast && (
+              <div className="mt-3 rounded-2xl bg-emerald-50 px-4 py-2.5 text-center text-xs text-emerald-600">
+                {bindingToast}
+              </div>
+            )}
+
+            {/* 已绑定的家人 */}
+            {myAccount?.boundPartnerId && (
+              <div className="mt-4">
+                <p className="text-xs font-medium text-stone-400">
+                  ✓ 已绑定的{identity.role === "child" ? "长辈" : "子女"}
+                </p>
+                <div className="mt-2 flex items-center gap-3 rounded-2xl border border-emerald-100 bg-emerald-50 px-3 py-2">
+                  <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-medium ${identity.role === "child" ? "bg-[#FFF1C7] text-stone-700" : "bg-[#F2996E] text-white"}`}>
+                    {(myAccount.boundPartnerName ?? "?").slice(0, 1)}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-stone-700">{myAccount.boundPartnerName ?? "家人"}</p>
+                    <p className="text-xs text-emerald-500">{myAccount.boundPartnerId} · 已连接</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 添加绑定 */}
+            {!myAccount?.boundPartnerId && (
+              <div className="mt-4">
+                <p className="text-xs font-medium text-stone-400">
+                  {identity.role === "child" ? "📌 添加长辈ID" : "📎 添加子女ID"}
+                </p>
+                <p className="mt-1 text-[11px] text-stone-300">输入对方的身份ID，发送请求等对方通过即可绑定</p>
+                <div className="mt-2 flex gap-2">
+                  <input
+                    type="text"
+                    value={bindingInputId}
+                    onChange={(e) => setBindingInputId(e.target.value.toUpperCase())}
+                    placeholder="如 YD-1234"
+                    maxLength={10}
+                    className="min-h-10 flex-1 rounded-full border border-stone-200 bg-stone-50 px-4 py-2 text-sm text-stone-800 outline-none transition-colors focus:border-[#F2996E] focus:bg-white"
+                  />
+                  <button
+                    type="button"
+                    onClick={sendBindingRequest}
+                    disabled={!bindingInputId.trim()}
+                    className="min-h-10 shrink-0 rounded-full bg-[#F2996E] px-4 py-2 text-sm font-medium text-white transition-opacity disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    发送
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* 待处理的绑定请求（收到的） */}
+            {bindingRequests.filter((r) => r.toUserId === identity.userId && r.status === "pending").length > 0 && (
+              <div className="mt-4">
+                <p className="text-xs font-medium text-stone-400">🔔 收到的绑定请求</p>
+                <div className="mt-2 space-y-2">
+                  {bindingRequests
+                    .filter((r) => r.toUserId === identity.userId && r.status === "pending")
+                    .map((req) => (
+                      <div key={req.id} className="flex items-center gap-3 rounded-2xl border border-orange-100 bg-orange-50/50 px-3 py-2">
+                        <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-medium ${req.fromRole === "child" ? "bg-[#F2996E] text-white" : "bg-[#FFF1C7] text-stone-700"}`}>
+                          {req.fromDisplayName.slice(0, 1)}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-medium text-stone-700">{e.displayName}</p>
-                          <p className="text-xs text-stone-400">{e.relation}</p>
+                          <p className="truncate text-sm font-medium text-stone-700">{req.fromDisplayName}</p>
+                          <p className="text-xs text-stone-400">{req.fromUserId} 想绑定你</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => approveBinding(req.id)}
+                          className="min-h-8 shrink-0 rounded-full bg-[#F2996E] px-3 py-1 text-xs font-medium text-white"
+                        >
+                          通过
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => rejectBinding(req.id)}
+                          className="min-h-8 shrink-0 rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-500"
+                        >
+                          拒绝
+                        </button>
+                      </div>
+                    ))}
+                </div>
+              </div>
+            )}
+
+            {/* 已发送的请求（等待确认） */}
+            {bindingRequests.filter((r) => r.fromUserId === identity.userId && r.status === "pending").length > 0 && (
+              <div className="mt-4">
+                <p className="text-xs font-medium text-stone-400">⏳ 已发送的请求</p>
+                <div className="mt-2 space-y-2">
+                  {bindingRequests
+                    .filter((r) => r.fromUserId === identity.userId && r.status === "pending")
+                    .map((req) => (
+                      <div key={req.id} className="flex items-center gap-3 rounded-2xl border border-stone-100 bg-stone-50 px-3 py-2">
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-stone-200 text-sm font-medium text-stone-500">
+                          ?
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm text-stone-600">{req.toUserId}</p>
+                          <p className="text-xs text-stone-400">等待对方确认...</p>
                         </div>
                       </div>
-                    ))
-                  ) : (
-                    <p className="rounded-2xl bg-stone-50 px-3 py-2 text-xs text-stone-400">还没有绑定长辈。</p>
-                  )
-                ) : (
-                  CAREGIVERS.map((c) => (
-                    <div
-                      key={c.id}
-                      className="flex items-center gap-3 rounded-2xl border border-stone-100 bg-stone-50 px-3 py-2"
-                    >
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#F2996E] text-sm font-medium text-white">
-                        {c.displayName.slice(0, 1)}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-medium text-stone-700">{c.displayName}</p>
-                        <p className="text-xs text-stone-400">{c.relation}</p>
-                      </div>
-                    </div>
-                  ))
-                )}
+                    ))}
+                </div>
               </div>
-            </div>
+            )}
 
             {/* 操作 */}
             <div className="mt-5 flex gap-2">
@@ -3844,12 +4343,15 @@ export default function HomePage() {
                 <span className="text-stone-200">|</span>
                 <button
                   type="button"
-                  onClick={() => setIdentityCardOpen(true)}
+                  onClick={() => {
+                    setIdentityCardOpen(true);
+                    refreshAccountInfo();
+                  }}
                   className="ml-1 flex h-9 w-9 items-center justify-center rounded-full bg-[#F2996E] text-sm font-medium text-white shadow-sm transition-transform hover:scale-105"
                   aria-label="我的身份"
-                  title={identity ? CAREGIVERS.find((c) => c.id === identity.personId)?.displayName ?? "我" : "我"}
+                  title={identity?.displayName ?? "我"}
                 >
-                  {(identity ? CAREGIVERS.find((c) => c.id === identity.personId)?.displayName ?? "我" : "我").slice(0, 1)}
+                  {(identity?.displayName ?? "我").slice(0, 1)}
                 </button>
               </div>
             </div>
@@ -3872,6 +4374,15 @@ export default function HomePage() {
                   </button>
                   {isSummaryExpanded && <p className="mt-1 text-center text-[12px] leading-5 text-stone-500">{currentSummary}</p>}
                 </div>
+
+                {/* 念念帮你惦记了X件事 */}
+                <p className="px-4 text-center text-[13px] leading-6 text-stone-400">
+                  {(() => {
+                    const trackedTasks = currentElder ? tasks.filter((t) => t.elderId === currentElder.id) : tasks;
+                    const elderName = currentElder?.displayName ?? "家人";
+                    return `念念帮你惦记了${elderName}${trackedTasks.length}件事...`;
+                  })()}
+                </p>
 
                 {/* Proactive care suggestions (Step 5) */}
                 {proactiveSuggestions.length > 0 && (

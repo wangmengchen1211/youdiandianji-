@@ -22,6 +22,10 @@ export function init(params: {
   phone: string;
   provider: string;
   callPlan?: CallSession["callPlan"];
+  // --- v2.1 身份锁定字段 ---
+  caregiverDisplayName?: string;
+  elderDisplayName?: string;
+  elderRelation?: string;
 }): CallSession {
   const session: CallSession = {
     id: store.genId("cs"),
@@ -59,7 +63,37 @@ export function init(params: {
     updatedAt: new Date().toISOString(),
   };
 
+  // --- v2.1 身份锁定：将角色信息附加到 session ---
+  const ext = session as CallSession & {
+    caregiverDisplayName?: string;
+    elderDisplayName?: string;
+    elderRelation?: string;
+  };
+  ext.caregiverDisplayName = params.caregiverDisplayName ?? "";
+  ext.elderDisplayName = params.elderDisplayName ?? "";
+  ext.elderRelation = params.elderRelation ?? "";
+
   return store.addCallSession(session);
+}
+
+/**
+ * v2.1 获取身份锁定信息
+ */
+export function getIdentityLock(sessionId: string): {
+  caregiverDisplayName: string;
+  elderDisplayName: string;
+  elderRelation: string;
+} {
+  const session = store.getCallSession(sessionId) as CallSession & {
+    caregiverDisplayName?: string;
+    elderDisplayName?: string;
+    elderRelation?: string;
+  };
+  return {
+    caregiverDisplayName: session?.caregiverDisplayName ?? "",
+    elderDisplayName: session?.elderDisplayName ?? "",
+    elderRelation: session?.elderRelation ?? "",
+  };
 }
 
 /**

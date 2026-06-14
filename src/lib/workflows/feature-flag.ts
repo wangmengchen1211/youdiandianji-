@@ -25,6 +25,20 @@ export function isV2Enabled(chain: ChainKind): boolean {
 }
 
 /**
+ * 判断是否开启 v2.1 三步编排（UnderstandTurn → DecideNextAction → GenerateReply）。
+ *
+ * v2.1 在 v2 基础上进一步拆分，解决状态机管太多的问题。
+ * 优先级：
+ * 1. AGENT_V21_CALL=true → 开启 v2.1
+ * 2. AGENT_ARCH_VERSION=v2.1 → 全量开启
+ * 3. 需要先开启 v2（isV2Enabled("call")=true）
+ */
+export function isV21CallEnabled(): boolean {
+  if (process.env.AGENT_ARCH_VERSION === "v2.1") return true;
+  return process.env.AGENT_V21_CALL === "true";
+}
+
+/**
  * v2 workflow 抛错时调用此函数，判断是否应该 fallback 到 v1。
  * 当前策略：总是 fallback（记录错误）。
  */
