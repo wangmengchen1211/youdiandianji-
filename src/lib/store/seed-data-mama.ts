@@ -17,6 +17,13 @@ import type {
  *  - 最近几年很少向外社交
  *  - 最近在西安和爸爸一起
  *  - 子女：小雨（user_001）
+ *
+ * 前端映射（buildDemoState Elder 字段参考）：
+ *  - oneLinePortrait: "嘴上说别管我，聊起老家就停不下来"
+ *  - healthFocus: ["血糖", "甲状腺术后", "优甲乐", "运动", "体重"]
+ *  - recentSignals: ["最近在西安和爸爸一起", "不太愿意测血糖", "社交变少了"]
+ *  - personalityTraits: ["蒙古族辽阳人，聊老家话题会开心", "不喜欢被反复追问健康", "接到子女电话会开心但不说", "最近几年社交变少，子女担心心情"]
+ *  - relationshipMemories: ["妈妈是蒙古族辽阳人，喜欢聊老家", "前年甲状腺切除手术，不太愿意提", "小雨想让妈妈多运动多测血糖，但妈妈不太配合", "妈妈最近几年社交变少了", "妈妈最近在西安和爸爸一起生活"]
  */
 export function seedMamaData(): {
   elders: Elder[];
@@ -227,7 +234,7 @@ export function seedMamaData(): {
         tone: "warm_family_like",
       },
       status: "active",
-      nextRunAt: "2026-06-12T15:00:00+08:00",
+      nextRunAt: new Date(Date.now() + 60 * 1000).toISOString(), // 1分钟后触发，便于测试
       createdAt: "2026-06-10T10:00:00+08:00",
       updatedAt: "2026-06-10T10:00:00+08:00",
     },

@@ -6,6 +6,7 @@ import type {
   Memory,
   TaskTemplate,
 } from "./types";
+import type { MemoryStore } from "./memory-store";
 import { seedMamaData } from "./seed-data-mama";
 
 export function seedDemoData() {
@@ -180,22 +181,44 @@ export function seedDemoData() {
         tone: "warm_family_like",
       },
       status: "active",
-      nextRunAt: "2026-01-01T20:00:00+08:00",
+      nextRunAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(), // 5分钟后触发
       createdAt: "2026-01-01T10:00:00+08:00",
       updatedAt: "2026-01-01T10:00:00+08:00",
     },
   ];
 
   // 合并第二组 mock 数据（妈妈 - 杨艳梅）
+  // 注意：妈妈数据放在前面，确保调度器优先触发妈妈的通话任务
   const mamaData = seedMamaData();
 
   return {
     familyId,
-    elders: [...elders, ...mamaData.elders],
+    elders: [...mamaData.elders, ...elders],
     caregivers: [...caregivers, ...mamaData.caregivers],
     caregiverUpdates: [...caregiverUpdates, ...mamaData.caregiverUpdates],
-    relationshipProfiles: [...relationshipProfiles, ...mamaData.relationshipProfiles],
-    memories: [...memories, ...mamaData.memories],
-    taskTemplates: [...taskTemplates, ...mamaData.taskTemplates],
+    relationshipProfiles: [...mamaData.relationshipProfiles, ...relationshipProfiles],
+    memories: [...mamaData.memories, ...memories],
+    // 妈妈的模板排在最前，调度器遍历时优先触发
+    taskTemplates: [...mamaData.taskTemplates, ...taskTemplates],
   };
+}
+
+// =====================================================================
+// 正式 Seed 函数：确保 Demo 可复现
+// =====================================================================
+
+/**
+ * 加载完整的 Mock 家庭数据（奶奶 + 爸爸 + 妈妈杨艳梅）。
+ * 用于 Demo 或测试场景下确保数据可复现。
+ */
+export function loadMockMomFamily() {
+  return seedDemoData();
+}
+
+/**
+ * 重置 MemoryStore 为初始状态（使用完整 Mock 数据）。
+ * 确保每次 Demo 开始时数据一致。
+ */
+export function resetMockStore(store: MemoryStore): void {
+  store.reset(seedDemoData());
 }

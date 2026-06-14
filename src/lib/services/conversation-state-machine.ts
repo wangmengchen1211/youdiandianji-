@@ -1,4 +1,4 @@
-import type { CallStage, ConversationState } from "../store/types";
+import type { CallStage, ConversationState, ProbeBudget } from "../store/types";
 
 /**
  * Ordered call stages. The state machine controls transitions deterministically.
@@ -117,5 +117,94 @@ export function createInitialState(): ConversationState {
     relationshipSlots: {},
     riskSignals: [],
     completedStages: [],
+    probeBudget: {
+      total: 3,
+      health: 1,
+      relationship: 2,
+      totalRemaining: 3,
+      healthRemaining: 1,
+      relationshipRemaining: 2,
+    },
+    elderWillingness: "unknown",
+    shouldCloseSoon: false,
+    elapsedSeconds: 0,
   };
+}
+
+/**
+ * Update probe budget with a partial patch.
+ */
+export function updateProbeBudget(
+  state: ConversationState,
+  patch: Partial<ProbeBudget>
+): void {
+  Object.assign(state.probeBudget, patch);
+  // Ensure remaining doesn't exceed total
+  state.probeBudget.totalRemaining = Math.min(
+    state.probeBudget.totalRemaining,
+    state.probeBudget.total
+  );
+  state.probeBudget.healthRemaining = Math.min(
+    state.probeBudget.healthRemaining,
+    state.probeBudget.health
+  );
+  state.probeBudget.relationshipRemaining = Math.min(
+    state.probeBudget.relationshipRemaining,
+    state.probeBudget.relationship
+  );
+}
+
+/**
+ * Should we end the call?
+ * Based on elapsed time, turn count, elder willingness, and shouldCloseSoon flag.
+ *
+ * P1-5: 让位 LLM 决策。
+ * - 硬限制（refused / 超时 / 超轮次）仍然强制结束
+ * - shouldCloseSoon（如 probe_budget 用尽）只是软信号，会透传给 LLM
+ *   让它自己决定是否要推进到 closing，状态机不再强制覆盖
+ */
+export function shouldEndCall(state: ConversationState): boolean {
+  // Elder explicitly refused
+  if (state.elderWillingness === "refused") return true;
+
+  // Max duration exceeded (default 4 minutes = 240s)
+  if (state.elapsedSeconds > 240) return true;
+
+  // Too many turns without progress
+  if (state.turnCount > 12) return true;
+
+  // 注：state.shouldCloseSoon 不再作为硬结束条件，
+  // 而是透传给 LLM 供参考（如 turn-planner 收到 closeHint=true 会主动收尾）
+
+  return false;
+}
+
+/**
+ * 是否"建议 LLM 主动收尾"的软信号
+ * 用于将 shouldCloseSoon 等状态以 hint 形式喂给 LLM
+ */
+export function shouldSuggestClose(state: ConversationState): boolean {
+  return state.shouldCloseSoon && state.turnCount >= 6;
+}
+
+/**
+ * Should we enter listen_and_reflect stage?
+ * Enhanced version of shouldListenAndReflect with more signals.
+ */
+export function shouldEnterListenAndReflect(elderReply: string): boolean {
+  const emotionalKeywords = [
+    "想", "担心", "怕", "难过", "孤单", "不开心",
+    "累", "没事", "不用管", "忙她的", "别操心", "不碍事",
+    "算了", "不想说", "没什么", "你们忙",
+  ];
+  const replyLen = elderReply.length;
+  const hasEmotion = emotionalKeywords.some((kw) => elderReply.includes(kw));
+
+  // Longer replies with emotional content → listen and reflect
+  if (replyLen > 30 && hasEmotion) return true;
+
+  // Very long reply (>80 chars) likely means elder is sharing something important
+  if (replyLen > 80) return true;
+
+  return false;
 }

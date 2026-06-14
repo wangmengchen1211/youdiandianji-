@@ -94,3 +94,78 @@ export async function callLLMJson(
 ): Promise<string> {
   return callLLM(messages, { ...options, jsonMode: true });
 }
+
+// =====================================================================
+// Traced LLM call - records every call for observability
+// =====================================================================
+import { traceStore } from "./trace-store";
+
+function estimateTokens(text: string): number {
+  // Rough estimate: ~1.5 tokens per Chinese character, ~0.75 per English word
+  const chinese = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+  const english = text.length - chinese;
+  return Math.ceil(chinese * 1.5 + english * 0.3);
+}
+
+export type TracedCallOptions = LLMCallOptions & {
+  agentName: string;
+};
+
+/**
+ * Call LLM with automatic trace recording.
+ * All new Agent modules should use this instead of raw callLLM.
+ */
+export async function callLLMTraced(
+  messages: ChatMessage[],
+  options: TracedCallOptions
+): Promise<string> {
+  const { agentName, ...llmOptions } = options;
+  const start = Date.now();
+  const inputSummary = messages
+    .map((m) => `${m.role}: ${m.content.slice(0, 120)}...`)
+    .join("\n")
+    .slice(0, 500);
+
+  try {
+    const content = await callLLM(messages, llmOptions);
+    const latencyMs = Date.now() - start;
+    traceStore.record({
+      agentName,
+      inputSummary,
+      outputSummary: content.slice(0, 500),
+      schemaValid: true,
+      latencyMs,
+      usedFallback: false,
+      tokenEstimate: {
+        prompt: estimateTokens(inputSummary),
+        completion: estimateTokens(content),
+      },
+      timestamp: new Date().toISOString(),
+    });
+    return content;
+  } catch (error) {
+    const latencyMs = Date.now() - start;
+    traceStore.record({
+      agentName,
+      inputSummary,
+      outputSummary: `ERROR: ${error instanceof Error ? error.message : String(error)}`,
+      schemaValid: false,
+      schemaError: error instanceof Error ? error.message : String(error),
+      latencyMs,
+      usedFallback: false,
+      tokenEstimate: { prompt: estimateTokens(inputSummary), completion: 0 },
+      timestamp: new Date().toISOString(),
+    });
+    throw error;
+  }
+}
+
+/**
+ * Convenience: call LLM in JSON mode with trace recording.
+ */
+export async function callLLMJsonTraced(
+  messages: ChatMessage[],
+  options: TracedCallOptions
+): Promise<string> {
+  return callLLMTraced(messages, { ...options, jsonMode: true });
+}

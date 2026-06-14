@@ -1,3 +1,8 @@
+/**
+ * @deprecated v2 架构已替代此模块。
+ * 替代模块: src/lib/cognitive/memory-insight-writer.ts
+ * 状态: deprecated → 待 Task 10 删除
+ */
 import { llmStructuredCall } from "../llm/json-utils";
 import { MemoryExtractionSchema } from "./schemas/memory-curator.schema";
 import { MEMORY_CURATOR_PROMPT } from "./prompts/memory-curator.prompt";

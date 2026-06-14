@@ -9,6 +9,10 @@ import type {
   RelayMessage,
   Memory,
   CareInsight,
+  CareCase,
+  HookEvent,
+  HookCandidate,
+  ProactiveMessage,
 } from "./types";
 import { seedDemoData } from "./seed-data";
 
@@ -26,6 +30,10 @@ export class MemoryStore {
   relayMessages: RelayMessage[];
   memories: Memory[];
   careInsights: CareInsight[];
+  careCases: CareCase[];
+  hookEvents: HookEvent[];
+  hookCandidates: HookCandidate[];
+  proactiveMessages: ProactiveMessage[];
 
   private idCounter = 100;
 
@@ -41,6 +49,10 @@ export class MemoryStore {
     this.relayMessages = [];
     this.memories = [...seed.memories];
     this.careInsights = [];
+    this.careCases = [];
+    this.hookEvents = [];
+    this.hookCandidates = [];
+    this.proactiveMessages = [];
   }
 
   genId(prefix: string): string {
@@ -231,6 +243,94 @@ export class MemoryStore {
     return insight;
   }
 
+  // --- Care Cases ---
+  addCareCase(careCase: CareCase): CareCase {
+    this.careCases.push(careCase);
+    return careCase;
+  }
+  getCareCase(id: string): CareCase | undefined {
+    return this.careCases.find((c) => c.id === id);
+  }
+  getOpenCareCases(elderId?: string): CareCase[] {
+    return this.careCases.filter(
+      (c) => c.status === "open" && (!elderId || c.elderId === elderId)
+    );
+  }
+  updateCareCase(
+    id: string,
+    patch: Partial<CareCase>
+  ): CareCase | undefined {
+    const c = this.careCases.find((x) => x.id === id);
+    if (c) Object.assign(c, patch, { updatedAt: new Date().toISOString() });
+    return c;
+  }
+
+  // --- Hook Events ---
+  addHookEvent(event: HookEvent): HookEvent {
+    this.hookEvents.push(event);
+    return event;
+  }
+  getRecentHookEvents(
+    sourceId?: string,
+    limit = 20
+  ): HookEvent[] {
+    let events = this.hookEvents;
+    if (sourceId) events = events.filter((e) => e.sourceId === sourceId);
+    return events
+      .sort(
+        (a, b) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      )
+      .slice(0, limit);
+  }
+
+  // --- Hook Candidates ---
+  addHookCandidate(candidate: HookCandidate): HookCandidate {
+    this.hookCandidates.push(candidate);
+    return candidate;
+  }
+  getHookCandidateByIdempotencyKey(
+    key: string
+  ): HookCandidate | undefined {
+    return this.hookCandidates.find((c) => c.idempotencyKey === key);
+  }
+  getEligibleHookCandidates(now: Date): HookCandidate[] {
+    return this.hookCandidates.filter(
+      (c) =>
+        c.status === "pending" &&
+        new Date(c.scheduledAt).getTime() <= now.getTime()
+    );
+  }
+  updateHookCandidate(
+    id: string,
+    patch: Partial<HookCandidate>
+  ): HookCandidate | undefined {
+    const c = this.hookCandidates.find((x) => x.id === id);
+    if (c) Object.assign(c, patch);
+    return c;
+  }
+
+  // --- Proactive Messages ---
+  addProactiveMessage(msg: ProactiveMessage): ProactiveMessage {
+    this.proactiveMessages.push(msg);
+    return msg;
+  }
+  getDueProactiveMessages(now: Date): ProactiveMessage[] {
+    return this.proactiveMessages.filter(
+      (m) =>
+        m.status === "queued" &&
+        (!m.snoozedUntil || new Date(m.snoozedUntil).getTime() <= now.getTime())
+    );
+  }
+  updateProactiveMessage(
+    id: string,
+    patch: Partial<ProactiveMessage>
+  ): ProactiveMessage | undefined {
+    const m = this.proactiveMessages.find((x) => x.id === id);
+    if (m) Object.assign(m, patch);
+    return m;
+  }
+
   // --- Debug ---
   reset(seed: SeedData): void {
     const fresh = new MemoryStore(seed);
@@ -250,6 +350,10 @@ export class MemoryStore {
       relayMessages: this.relayMessages,
       memories: this.memories,
       careInsights: this.careInsights,
+      careCases: this.careCases,
+      hookEvents: this.hookEvents,
+      hookCandidates: this.hookCandidates,
+      proactiveMessages: this.proactiveMessages,
     };
   }
 }

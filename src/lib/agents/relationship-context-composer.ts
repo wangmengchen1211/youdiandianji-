@@ -1,3 +1,8 @@
+/**
+ * @deprecated v2 架构已替代此模块。
+ * 替代模块: src/lib/services/context.service.ts
+ * 状态: deprecated → 待 Task 10 删除
+ */
 import { store } from "../store/memory-store";
 import type { RelationshipContext } from "../store/types";
 

@@ -1,3 +1,8 @@
+/**
+ * @deprecated v2 架构已替代此模块。
+ * 替代模块: src/lib/cognitive/task-blueprint-extractor.ts
+ * 状态: deprecated → 待 Task 10 删除
+ */
 import { llmStructuredCall } from "../llm/json-utils";
 import { TaskBlueprintSchema } from "./schemas/task-designer.schema";
 import { TASK_DESIGNER_PROMPT } from "./prompts/task-designer.prompt";

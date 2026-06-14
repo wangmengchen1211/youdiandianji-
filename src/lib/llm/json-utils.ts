@@ -1,5 +1,6 @@
 import { z, ZodTypeAny } from "zod";
-import { callLLMJson, ChatMessage, LLMCallOptions } from "./llm-provider";
+import { callLLMJson, callLLMJsonTraced, ChatMessage, LLMCallOptions } from "./llm-provider";
+import { traceStore } from "./trace-store";
 
 /**
  * Try to extract JSON from a string that may contain markdown fences or extra text
@@ -160,5 +161,116 @@ export async function llmStructuredCall<T extends ZodTypeAny>(
 
   throw new Error(
     `LLM structured call failed after ${maxRetries + 1} attempts: ${lastError}`
+  );
+}
+
+// =====================================================================
+// Traced structured call - all new Agents should use this
+// =====================================================================
+
+function estimateTokens(text: string): number {
+  const chinese = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+  const english = text.length - chinese;
+  return Math.ceil(chinese * 1.5 + english * 0.3);
+}
+
+/**
+ * Traced version of llmStructuredCall. Records agent name, latency, schema result.
+ * All new Agent modules MUST use this instead of raw llmStructuredCall.
+ */
+export async function generateStructured<T extends ZodTypeAny>(
+  messages: ChatMessage[],
+  schema: T,
+  options: {
+    agentName: string;
+    llmOptions?: Omit<LLMCallOptions, "jsonMode">;
+    fallback?: z.infer<T>;
+    maxRetries?: number;
+  }
+): Promise<{ data: z.infer<T>; raw: string }> {
+  const { agentName } = options;
+  const maxRetries = options.maxRetries ?? 1;
+  const start = Date.now();
+  const inputSummary = messages
+    .map((m) => `${m.role}: ${m.content.slice(0, 120)}...`)
+    .join("\n")
+    .slice(0, 500);
+
+  let lastRaw = "";
+  let lastError = "";
+  let usedFallback = false;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const augmentedMessages =
+      attempt > 0
+        ? [
+            ...messages,
+            {
+              role: "user" as const,
+              content: `Your previous JSON output had an error: ${lastError}. Please fix it and output valid JSON only.`,
+            },
+          ]
+        : messages;
+
+    lastRaw = await callLLMJson(augmentedMessages, options.llmOptions);
+    const result = parseAndValidate(lastRaw, schema);
+
+    if (result.success && result.data !== null) {
+      const latencyMs = Date.now() - start;
+      traceStore.record({
+        agentName,
+        inputSummary,
+        outputSummary: lastRaw.slice(0, 500),
+        schemaValid: true,
+        latencyMs,
+        usedFallback,
+        tokenEstimate: {
+          prompt: estimateTokens(inputSummary),
+          completion: estimateTokens(lastRaw),
+        },
+        timestamp: new Date().toISOString(),
+      });
+      return { data: result.data, raw: lastRaw };
+    }
+
+    lastError = result.error ?? "Unknown error";
+  }
+
+  // All retries exhausted
+  if (options.fallback) {
+    const latencyMs = Date.now() - start;
+    traceStore.record({
+      agentName,
+      inputSummary,
+      outputSummary: lastRaw.slice(0, 500) || "(fallback used)",
+      schemaValid: false,
+      schemaError: lastError,
+      latencyMs,
+      usedFallback: true,
+      fallbackReason: lastError,
+      tokenEstimate: {
+        prompt: estimateTokens(inputSummary),
+        completion: estimateTokens(lastRaw),
+      },
+      timestamp: new Date().toISOString(),
+    });
+    return { data: options.fallback, raw: lastRaw };
+  }
+
+  const latencyMs = Date.now() - start;
+  traceStore.record({
+    agentName,
+    inputSummary,
+    outputSummary: `FAILED: ${lastError}`,
+    schemaValid: false,
+    schemaError: lastError,
+    latencyMs,
+    usedFallback: false,
+    tokenEstimate: { prompt: estimateTokens(inputSummary), completion: 0 },
+    timestamp: new Date().toISOString(),
+  });
+
+  throw new Error(
+    `generateStructured [${agentName}] failed after ${maxRetries + 1} attempts: ${lastError}`
   );
 }

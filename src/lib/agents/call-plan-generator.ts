@@ -1,3 +1,8 @@
+/**
+ * @deprecated v2 架构已替代此模块。
+ * 替代模块: src/lib/cognitive/call-plan-builder.ts
+ * 状态: deprecated → 待 Task 10 删除
+ */
 import { llmStructuredCall } from "../llm/json-utils";
 import { CallPlanSchema } from "./schemas/call-plan.schema";
 import { CALL_PLAN_GENERATOR_PROMPT } from "./prompts/call-plan-generator.prompt";
@@ -65,13 +70,13 @@ export async function generateCallPlan(
     max_duration_seconds: 180,
     max_extra_questions: 2,
     stages: [
-      { stage: "identity_and_consent", goal: "说明身份并自然开场", sample_script: `${context.elderProfile.displayName}，您好呀。我是${context.caregiverProfile.displayName}那边的小助理，TA今天有点惦记您，让我来问候一声。` },
-      { stage: "warm_greeting", goal: "温暖问候，先聊聊日常", sample_script: "您今天过得怎么样？" },
+      { stage: "identity_and_consent", goal: "说明身份并自然开场", sample_script: `${context.elderProfile.displayName}呀，您好呀~我是${context.caregiverProfile.displayName}设置的小助理念念，TA今天惦记您啦，让我来跟您聊几句~` },
+      { stage: "warm_greeting", goal: "温暖问候，先聊聊日常", sample_script: "您今天过得怎么样呀？" },
       { stage: "child_update", goal: "自然转达近况和传话", sample_script: relayScript },
       { stage: "open_care_question", goal: "关心长辈状态（变化话题）", sample_script: careScript },
-      { stage: "task_reminder", goal: "核心提醒", sample_script: "对了，有个事想提醒您一下。" },
-      { stage: "ask_relay_message", goal: "询问带话", sample_script: `您有没有什么话想让我带给${context.caregiverProfile.displayName}？` },
-      { stage: "closing", goal: "温柔结束", sample_script: "好，我都记下来了。您注意休息，有什么事随时告诉我。" },
+      { stage: "task_reminder", goal: "核心提醒", sample_script: "对了对了，有个事想提醒您一下呀~" },
+      { stage: "ask_relay_message", goal: "询问带话", sample_script: `您有没有什么话想让我带给${context.caregiverProfile.displayName}呀？` },
+      { stage: "closing", goal: "温柔结束", sample_script: "好呀，我都记下来了~您注意休息呀，有什么事随时跟我说~" },
     ],
   };
 

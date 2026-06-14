@@ -1,0 +1,923 @@
+{
+  "families": [
+    {
+      "id": "family_001",
+      "name": "我和妈妈",
+      "description": "女儿和妈妈目前都在北京，爸爸在西安。核心照护对象为妈妈杨艳梅。",
+      "created_at": "2026-01-01T10:00:00+08:00"
+    }
+  ],
+
+  "caregivers": [
+    {
+      "id": "caregiver_001",
+      "family_id": "family_001",
+      "display_name": "女儿",
+      "role": "daughter",
+      "location": "北京",
+      "relationship_to_elder": "女儿",
+      "writing_style": {
+        "tone": "直接、理性、偶尔着急，但底层很关心",
+        "preferred_agent_style": "不要机械共情，要帮我分析、追问、指出关系里的问题，也要给我可执行建议",
+        "avoid": [
+          "不要只说我理解你",
+          "不要泛泛安慰",
+          "不要把所有问题都变成提醒任务",
+          "不要站在道德高地指责我",
+          "不要制造愧疚"
+        ],
+        "desired": [
+          "帮我把对妈妈的担心拆成具体事实",
+          "帮我识别妈妈的心理状态",
+          "帮我处理我和妈妈之间的沟通张力",
+          "帮我把难听的话改得不刺耳",
+          "必要时提醒我温和一点，但不要说教"
+        ]
+      },
+      "caregiver_emotional_profile": {
+        "core_feelings": [
+          "很爱妈妈，也知道妈妈很爱我",
+          "经常因为妈妈不听话、不理解、忘事而烦躁",
+          "担心妈妈退休后状态越来越差",
+          "担心妈妈认知能力下降",
+          "希望妈妈去西安后有人陪、有事做、有人监督健康"
+        ],
+        "sensitive_points": [
+          "妈妈习惯性说“啊？”会让我很烦",
+          "妈妈不听我说话，按自己想法做事，会让我觉得失控",
+          "妈妈控制我的选择时，我会有抵触",
+          "我不想被简单评价为不孝或没耐心"
+        ]
+      },
+      "created_at": "2026-01-01T10:00:00+08:00",
+      "updated_at": "2026-01-01T10:00:00+08:00"
+    }
+  ],
+
+  "elders": [
+    {
+      "id": "elder_001",
+      "family_id": "family_001",
+      "display_name": "妈妈",
+      "real_name": "杨艳梅",
+      "gender": "female",
+      "ethnicity": "蒙古族",
+      "birthday": "1971-05-30",
+      "relation": "mother",
+      "phone": "13800000000",
+      "current_city": "北京",
+      "hometown": "辽宁辽阳",
+      "marital_family_context": {
+        "husband_location": "西安",
+        "husband_family_location": "西安",
+        "daughter_location": "北京",
+        "possible_future_plan": "等女儿工作后，妈妈可能回西安陪爷爷奶奶"
+      },
+      "life_stage": {
+        "retirement_status": "已退休",
+        "retired_years": "2-3年",
+        "current_routine_summary": "退休后社交少、运动少，经常躺在床上看短剧，不太做饭，生活比较大条。"
+      },
+      "health_profile": {
+        "known_conditions": [
+          {
+            "condition": "糖尿病",
+            "diagnosed_time": "约两年前",
+            "status": "血糖目前较为稳定",
+            "notes": "平时并没有很好地控制饮食，对升糖食物理解不足。"
+          },
+          {
+            "condition": "甲状腺癌",
+            "diagnosed_time": "约两年前",
+            "treatment": "已切除甲状腺",
+            "status": "术后状态未详细记录",
+            "notes": "需要避免 Agent 做医疗诊断，只能提醒复查、记录身体状态。"
+          }
+        ],
+        "diet_related_notes": [
+          "妈妈不太好好控制血糖。",
+          "她可能以为“不甜就不升糖”。",
+          "女儿多次解释过哪些食物升糖，但妈妈经常听不进去。",
+          "妈妈吃饭量较少，这可能是血糖相对稳定的原因之一，但这只是女儿的观察，不应作为医学判断。"
+        ],
+        "cognitive_concerns": {
+          "status": "caregiver_concern_not_diagnosis",
+          "caregiver_observations": [
+            "女儿感觉妈妈理解能力变差。",
+            "有时候说什么话她经常不好理解。",
+            "即使听到了，也习惯性说“啊？”。",
+            "妈妈经常忘事。",
+            "妈妈有时不听女儿说话，按自己的想法做事情。",
+            "女儿担心这可能有认知下降前兆，但没有医学诊断。"
+          ],
+          "agent_safety_note": "Agent 不能说妈妈有老年痴呆，只能说“你观察到一些认知和日常功能变化，值得记录和必要时专业评估”。"
+        }
+      },
+      "personality_profile": {
+        "traits": [
+          "脾气倔",
+          "听不进去别人劝",
+          "爱女儿",
+          "有软性的控制欲",
+          "不太主动社交",
+          "生活上比较大条",
+          "不太精致"
+        ],
+        "communication_style": {
+          "likely_reactions": [
+            "被直接指出问题时容易抗拒",
+            "听到饮食控制建议时容易不耐烦或不当回事",
+            "可能不觉得自己在控制女儿",
+            "可能不觉得自己理解力下降或忘事"
+          ],
+          "better_approach": [
+            "不要一上来批评或纠正",
+            "先承认她的辛苦和不容易",
+            "把建议包装成“我想放心一点”而不是“你做错了”",
+            "每次只说一件事",
+            "用具体场景而不是抽象道理",
+            "少讲大道理，多给简单可执行动作"
+          ],
+          "avoid_phrases": [
+            "你怎么又不听",
+            "你这样不行",
+            "我都说多少遍了",
+            "你是不是老年痴呆",
+            "你怎么越来越笨",
+            "你必须控制血糖",
+            "你别总干涉我"
+          ],
+          "preferred_phrases": [
+            "妈，我就是想放心一点",
+            "咱先试一个简单的办法",
+            "不用一下子改很多",
+            "我不是说你有问题，我是担心你太累",
+            "这件事我们慢慢来",
+            "你先答应我今天做到这一点就行"
+          ]
+        }
+      },
+      "created_at": "2026-01-01T10:00:00+08:00",
+      "updated_at": "2026-01-01T10:00:00+08:00"
+    }
+  ],
+
+  "relationship_profiles": [
+    {
+      "id": "relationship_001",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": "caregiver_001",
+      "relationship_summary": "妈妈非常爱女儿，但也有自己不自觉的软性控制欲，经常干涉女儿的一些选择。女儿也很爱妈妈，但容易因为妈妈倔、不听、忘事、理解慢而烦躁。",
+      "tone_profile": {
+        "overall": "爱很深，但沟通中有拉扯和控制感",
+        "daughter_tone_to_mom": "直接、着急、讲道理，有时容易刺耳",
+        "mom_tone_to_daughter": "关心、操心、干涉、不自觉控制",
+        "agent_should_act_as": "温柔但不糊弄的中介，既理解女儿的烦躁，也保护妈妈的自尊"
+      },
+      "relationship_patterns": [
+        {
+          "pattern": "饮食控制冲突",
+          "description": "女儿反复提醒妈妈控制血糖、解释升糖食物，但妈妈听不进去，导致女儿挫败和烦躁。"
+        },
+        {
+          "pattern": "软性控制",
+          "description": "妈妈出于爱和担心，会干涉女儿的一些选择，但自己可能意识不到这是控制。"
+        },
+        {
+          "pattern": "理解和回应不顺畅",
+          "description": "妈妈经常说“啊？”或听了也不理解，女儿非常讨厌这一点，容易觉得妈妈没有认真听。"
+        },
+        {
+          "pattern": "女儿替妈妈规划未来",
+          "description": "女儿认为妈妈回西安陪爷爷奶奶可能是更好的选择，因为那里有人聊天、有事做、有人看着她控制血糖。"
+        }
+      ],
+      "sensitive_topics": [
+        {
+          "topic": "老年痴呆 / 认知下降",
+          "notes": "不能直接对妈妈说“你是不是老年痴呆”。对女儿端可以说“你观察到一些认知和日常功能变化”。"
+        },
+        {
+          "topic": "血糖控制",
+          "notes": "妈妈容易抗拒说教。Agent 应避免替女儿重复讲大道理，而应引导小目标。"
+        },
+        {
+          "topic": "回西安",
+          "notes": "女儿认为这是对妈妈更好的选择，但可能涉及妈妈的自主感、家庭角色和分离焦虑。"
+        },
+        {
+          "topic": "控制欲",
+          "notes": "对妈妈不要直接说“你控制欲强”。对女儿可帮助分析妈妈控制背后的不安全感和爱。"
+        }
+      ],
+      "agent_guidance": {
+        "when_talking_to_daughter": [
+          "不要只机械共情，要帮她拆解事实、关系、行动。",
+          "可以温和指出：妈妈的倔和控制可能来自不安全感、退休后的空心化和对女儿的依赖。",
+          "要承认女儿的烦躁是真实的，不要道德绑架。",
+          "遇到疑似认知下降，要建议记录具体行为，而不是直接判断。"
+        ],
+        "when_talking_to_mom": [
+          "不要说教。",
+          "不要一上来讲糖尿病知识。",
+          "每次只提醒一个很小的行动。",
+          "多用“你女儿想放心一点”。",
+          "可适度提到女儿惦记她，但不要制造压力。"
+        ]
+      },
+      "created_at": "2026-01-01T10:00:00+08:00",
+      "updated_at": "2026-01-01T10:00:00+08:00"
+    }
+  ],
+
+  "memories": [
+    {
+      "id": "mem_001",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": null,
+      "relationship_profile_id": null,
+      "memory_type": "health_memory",
+      "content": "妈妈杨艳梅约两年前查出糖尿病，目前血糖较为稳定。",
+      "structured_value": {
+        "condition": "糖尿病",
+        "diagnosed_time": "约两年前",
+        "current_status": "血糖较为稳定"
+      },
+      "source_type": "user_seed",
+      "source_id": null,
+      "confidence": 0.95,
+      "importance": "high",
+      "requires_review": false,
+      "reviewed": true,
+      "created_at": "2026-01-01T10:00:00+08:00"
+    },
+    {
+      "id": "mem_002",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": null,
+      "relationship_profile_id": null,
+      "memory_type": "health_memory",
+      "content": "妈妈约两年前查出甲状腺癌，已切除甲状腺。",
+      "structured_value": {
+        "condition": "甲状腺癌",
+        "treatment": "甲状腺切除",
+        "diagnosed_time": "约两年前"
+      },
+      "source_type": "user_seed",
+      "confidence": 0.95,
+      "importance": "high",
+      "requires_review": false,
+      "reviewed": true,
+      "created_at": "2026-01-01T10:00:00+08:00"
+    },
+    {
+      "id": "mem_003",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": null,
+      "relationship_profile_id": null,
+      "memory_type": "diet_memory",
+      "content": "妈妈平时不太好好控制血糖，对“升糖”理解不足，可能会觉得不甜就不升糖。",
+      "structured_value": {
+        "topic": "血糖控制",
+        "issue": "对升糖食物理解不足",
+        "caregiver_observation": true
+      },
+      "source_type": "user_seed",
+      "confidence": 0.9,
+      "importance": "high",
+      "requires_review": false,
+      "reviewed": true,
+      "created_at": "2026-01-01T10:00:00+08:00"
+    },
+    {
+      "id": "mem_004",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": null,
+      "relationship_profile_id": null,
+      "memory_type": "personality_memory",
+      "content": "妈妈脾气比较倔，别人反复劝她时，她容易听不进去。",
+      "structured_value": {
+        "trait": "倔",
+        "communication_risk": "抗拒说教"
+      },
+      "source_type": "user_seed",
+      "confidence": 0.9,
+      "importance": "high",
+      "requires_review": false,
+      "reviewed": true,
+      "created_at": "2026-01-01T10:00:00+08:00"
+    },
+    {
+      "id": "mem_005",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": null,
+      "relationship_profile_id": "relationship_001",
+      "memory_type": "relationship_memory",
+      "content": "妈妈很爱女儿，但有不自觉的软性控制欲，经常干涉女儿的一些选择。",
+      "structured_value": {
+        "relationship_pattern": "love_with_soft_control",
+        "sensitivity": "high"
+      },
+      "source_type": "user_seed",
+      "confidence": 0.9,
+      "importance": "high",
+      "requires_review": false,
+      "reviewed": true,
+      "created_at": "2026-01-01T10:00:00+08:00"
+    },
+    {
+      "id": "mem_006",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": "caregiver_001",
+      "relationship_profile_id": "relationship_001",
+      "memory_type": "caregiver_emotion_memory",
+      "content": "女儿很讨厌妈妈习惯性说“啊？”，因为这会让女儿觉得妈妈没听懂、没认真听，或者理解能力下降。",
+      "structured_value": {
+        "trigger": "妈妈习惯性说啊",
+        "caregiver_reaction": "烦躁、讨厌",
+        "underlying_concern": "担心妈妈理解能力下降"
+      },
+      "source_type": "user_seed",
+      "confidence": 0.9,
+      "importance": "medium_high",
+      "requires_review": false,
+      "reviewed": true,
+      "created_at": "2026-01-01T10:00:00+08:00"
+    },
+    {
+      "id": "mem_007",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": null,
+      "relationship_profile_id": null,
+      "memory_type": "routine_memory",
+      "content": "妈妈退休两三年，平时不太社交，也不运动，经常躺在床上看短剧。",
+      "structured_value": {
+        "retired_years": "2-3年",
+        "routine": ["少社交", "少运动", "看短剧", "躺床上"]
+      },
+      "source_type": "user_seed",
+      "confidence": 0.95,
+      "importance": "high",
+      "requires_review": false,
+      "reviewed": true,
+      "created_at": "2026-01-01T10:00:00+08:00"
+    },
+    {
+      "id": "mem_008",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": null,
+      "relationship_profile_id": null,
+      "memory_type": "cognitive_observation",
+      "content": "女儿观察到妈妈经常忘事、理解慢、听到后也习惯性说“啊？”，并担心这可能是认知下降信号。此为女儿观察，不是医学诊断。",
+      "structured_value": {
+        "status": "caregiver_observation_not_diagnosis",
+        "observations": ["忘事", "理解慢", "习惯性说啊", "按自己想法做事"],
+        "risk_note": "建议记录具体场景，必要时专业评估"
+      },
+      "source_type": "user_seed",
+      "confidence": 0.85,
+      "importance": "high",
+      "requires_review": true,
+      "reviewed": false,
+      "created_at": "2026-01-01T10:00:00+08:00"
+    },
+    {
+      "id": "mem_009",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": null,
+      "relationship_profile_id": null,
+      "memory_type": "daily_life_memory",
+      "content": "妈妈现在不太爱做饭，生活比较大条、不精致，吃饭量较少。",
+      "structured_value": {
+        "cooking": "不太爱做饭",
+        "life_style": "大条、不精致",
+        "meal_amount": "较少"
+      },
+      "source_type": "user_seed",
+      "confidence": 0.9,
+      "importance": "medium",
+      "requires_review": false,
+      "reviewed": true,
+      "created_at": "2026-01-01T10:00:00+08:00"
+    },
+    {
+      "id": "mem_010",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": "caregiver_001",
+      "relationship_profile_id": "relationship_001",
+      "memory_type": "future_plan_memory",
+      "content": "女儿认为妈妈未来回西安可能是更好的选择，因为那里有人聊天、有事做，也有人能看着她控制血糖。",
+      "structured_value": {
+        "possible_move": "西安",
+        "caregiver_reasoning": ["有人聊天", "忙起来", "有人监督血糖控制", "陪爷爷奶奶"],
+        "sensitivity": "可能涉及妈妈自主感和家庭安排"
+      },
+      "source_type": "user_seed",
+      "confidence": 0.9,
+      "importance": "high",
+      "requires_review": false,
+      "reviewed": true,
+      "created_at": "2026-01-01T10:00:00+08:00"
+    }
+  ],
+
+  "care_cases": [
+    {
+      "id": "case_001",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": "caregiver_001",
+      "case_type": "diabetes_diet_management",
+      "status": "open",
+      "summary": "妈妈有糖尿病，血糖目前稳定，但饮食控制意识弱，对升糖食物理解不足。女儿多次解释但妈妈听不进去。",
+      "known_facts": [
+        "妈妈约两年前查出糖尿病。",
+        "目前血糖较为稳定。",
+        "妈妈平时不太好好控制血糖。",
+        "妈妈可能觉得不甜就不升糖。",
+        "女儿已经多次解释过升糖问题。"
+      ],
+      "unknowns": [
+        "妈妈目前是否定期测血糖。",
+        "妈妈具体常吃哪些容易升糖的食物。",
+        "妈妈是否愿意接受非常小的饮食改变。",
+        "妈妈是否知道自己最近的血糖指标。"
+      ],
+      "risk_flags": [
+        {
+          "type": "chronic_condition_management",
+          "level": "medium",
+          "content": "糖尿病饮食控制不稳定。"
+        }
+      ],
+      "relationship_context": {
+        "conflict_pattern": "女儿越解释，妈妈越听不进去；女儿容易烦躁。",
+        "better_strategy": "不要讲大道理，改成一次一个小目标，比如今天少吃一种高升糖食物。"
+      },
+      "next_steps": [
+        "建立每日温和询问：今天有没有测血糖 / 今天有没有吃主食或甜食。",
+        "不要用责备语气提醒。",
+        "让 Agent 帮女儿把饮食提醒改写成不刺耳的表达。",
+        "通话中每次只问一个饮食相关问题。"
+      ],
+      "follow_up_at": "2026-01-02T20:30:00+08:00",
+      "created_at": "2026-01-01T10:00:00+08:00",
+      "updated_at": "2026-01-01T10:00:00+08:00"
+    },
+    {
+      "id": "case_002",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": "caregiver_001",
+      "case_type": "possible_cognitive_decline",
+      "status": "open",
+      "summary": "女儿担心妈妈可能出现认知下降：经常忘事、理解慢、听到也习惯性说“啊？”，有时不听女儿说话而按自己想法做事。此为担忧和观察，不是诊断。",
+      "known_facts": [
+        "女儿感觉妈妈理解能力变差。",
+        "妈妈经常说“啊？”。",
+        "妈妈经常忘事。",
+        "妈妈有时不按女儿说的做，而按自己想法做。",
+        "妈妈退休后长期缺少社交和运动。"
+      ],
+      "unknowns": [
+        "这些变化从什么时候开始。",
+        "是否突然变明显。",
+        "是否影响吃药、做饭、出门、财务、安全。",
+        "是否有走失、忘关火、重复购买、错服药等具体风险事件。",
+        "妈妈本人是否意识到这些变化。",
+        "爸爸或其他亲戚是否也观察到类似变化。"
+      ],
+      "risk_flags": [
+        {
+          "type": "cognitive_concern",
+          "level": "medium_high",
+          "content": "女儿观察到妈妈理解慢、忘事、反应变差。"
+        }
+      ],
+      "relationship_context": {
+        "daughter_feeling": "女儿既担心又烦躁，尤其讨厌妈妈习惯性说“啊？”。",
+        "elder_possible_inner_state": "妈妈可能并不觉得自己有问题，也可能用倔强和否认保护自尊。",
+        "communication_guidance": "不要直接说“你是不是老年痴呆”，而要说“我想让你更安全、更省心”。"
+      },
+      "next_steps": [
+        "引导女儿记录 2-3 个具体场景。",
+        "区分普通忘事与影响安全/日常功能的事件。",
+        "必要时建议与家人沟通并安排专业评估。",
+        "帮女儿准备不伤妈妈自尊的沟通话术。"
+      ],
+      "follow_up_at": "2026-01-02T21:00:00+08:00",
+      "created_at": "2026-01-01T10:00:00+08:00",
+      "updated_at": "2026-01-01T10:00:00+08:00"
+    },
+    {
+      "id": "case_003",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": "caregiver_001",
+      "case_type": "retirement_isolation_and_routine",
+      "status": "open",
+      "summary": "妈妈退休后社交少、运动少，经常躺在床上看短剧，不太做饭。女儿担心这会加速身体和认知状态下降。",
+      "known_facts": [
+        "妈妈退休两三年。",
+        "平时不太社交。",
+        "不太运动。",
+        "经常躺床上看短剧。",
+        "不太爱做饭。"
+      ],
+      "unknowns": [
+        "妈妈是否感到孤独。",
+        "妈妈是否愿意参与简单社交或运动。",
+        "妈妈是否有朋友或亲戚可以联系。",
+        "妈妈是否愿意回西安后和亲戚更多互动。"
+      ],
+      "risk_flags": [
+        {
+          "type": "social_isolation",
+          "level": "medium",
+          "content": "退休后社交和活动明显不足。"
+        }
+      ],
+      "relationship_context": {
+        "daughter_plan": "女儿认为回西安可能对妈妈更好。",
+        "possible_mom_state": "妈妈可能既依赖女儿，又缺少新的生活重心。"
+      },
+      "next_steps": [
+        "通话中每次轻问一个生活问题，例如今天有没有出去走走。",
+        "不要把运动说成任务，可说成“出去透口气”。",
+        "帮女儿探索妈妈是否愿意回西安、担心什么。"
+      ],
+      "follow_up_at": "2026-01-03T20:30:00+08:00",
+      "created_at": "2026-01-01T10:00:00+08:00",
+      "updated_at": "2026-01-01T10:00:00+08:00"
+    }
+  ],
+
+  "task_templates": [
+    {
+      "id": "task_tpl_001",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": "caregiver_001",
+      "title": "每日关心妈妈血糖和晚饭情况",
+      "task_type": "daily_care_call",
+      "status": "active",
+      "recurrence_rule": {
+        "type": "daily",
+        "time": "20:30",
+        "timezone": "Asia/Shanghai"
+      },
+      "primary_objectives": [
+        {
+          "type": "health_check",
+          "content": "问妈妈今天有没有测血糖或身体有没有不舒服"
+        },
+        {
+          "type": "diet_check",
+          "content": "轻轻问妈妈今天晚饭吃了什么，不要说教"
+        }
+      ],
+      "relationship_objectives": [
+        {
+          "type": "soft_connection",
+          "content": "让妈妈感到女儿是惦记她，不是在管她"
+        },
+        {
+          "type": "ask_relay_message",
+          "content": "问妈妈有没有话想带给女儿"
+        }
+      ],
+      "required_slots": [
+        "general_condition",
+        "blood_sugar_status",
+        "dinner_summary",
+        "message_to_daughter"
+      ],
+      "call_policy": {
+        "max_duration_seconds": 180,
+        "max_extra_questions": 2,
+        "tone": "warm_family_like",
+        "avoid": [
+          "不要说教",
+          "不要重复讲糖尿病大道理",
+          "不要说“不甜也升糖”超过一次",
+          "不要责备妈妈"
+        ]
+      },
+      "retry_policy": {
+        "max_attempts": 2,
+        "retry_after_minutes": 10
+      },
+      "created_at": "2026-01-01T10:00:00+08:00",
+      "updated_at": "2026-01-01T10:00:00+08:00"
+    },
+    {
+      "id": "task_tpl_002",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": "caregiver_001",
+      "title": "每周轻问妈妈最近有没有忘事或不方便的地方",
+      "task_type": "weekly_care_call",
+      "status": "active",
+      "recurrence_rule": {
+        "type": "weekly",
+        "weekday": "sunday",
+        "time": "20:00",
+        "timezone": "Asia/Shanghai"
+      },
+      "primary_objectives": [
+        {
+          "type": "cognitive_observation",
+          "content": "不要直接问认知下降，轻轻问最近有没有什么事容易忘、有没有哪里不方便"
+        },
+        {
+          "type": "routine_check",
+          "content": "问妈妈这周有没有出门走走或见人"
+        }
+      ],
+      "relationship_objectives": [
+        {
+          "type": "protect_elder_dignity",
+          "content": "避免让妈妈觉得自己被嫌弃或被监控"
+        }
+      ],
+      "required_slots": [
+        "forgetfulness_examples",
+        "routine_activity",
+        "mood_status"
+      ],
+      "call_policy": {
+        "max_duration_seconds": 180,
+        "max_extra_questions": 2,
+        "tone": "gentle_not_medical",
+        "avoid": [
+          "不要说老年痴呆",
+          "不要说记性越来越差",
+          "不要像问卷"
+        ]
+      },
+      "retry_policy": {
+        "max_attempts": 2,
+        "retry_after_minutes": 10
+      },
+      "created_at": "2026-01-01T10:00:00+08:00",
+      "updated_at": "2026-01-01T10:00:00+08:00"
+    }
+  ],
+
+  "mock_call_sessions": [
+    {
+      "id": "call_001",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": "caregiver_001",
+      "task_template_id": "task_tpl_001",
+      "status": "completed",
+      "started_at": "2026-01-01T20:30:00+08:00",
+      "ended_at": "2026-01-01T20:33:00+08:00",
+      "transcript": [
+        {
+          "speaker": "assistant",
+          "text": "杨阿姨，晚上好呀，我是念念，是你女儿设置的小助理。她今天有点惦记您，让我来问候一声。"
+        },
+        {
+          "speaker": "elder",
+          "text": "啊？哦，知道了。"
+        },
+        {
+          "speaker": "assistant",
+          "text": "没事，我慢慢说。她就是想问问您今天过得怎么样，身体还舒服吗？"
+        },
+        {
+          "speaker": "elder",
+          "text": "还行，没啥事。"
+        },
+        {
+          "speaker": "assistant",
+          "text": "那就好。今天晚饭吃了点什么呀？我帮她记一下，她就放心点。"
+        },
+        {
+          "speaker": "elder",
+          "text": "没吃多少，就吃了点粥和菜。"
+        },
+        {
+          "speaker": "assistant",
+          "text": "好，我记下来了。今天血糖有测吗？没测也没关系，您跟我说一声就行。"
+        },
+        {
+          "speaker": "elder",
+          "text": "没测，反正没啥感觉。"
+        },
+        {
+          "speaker": "assistant",
+          "text": "好，那我就跟她说您今天感觉还行。您有没有什么话想让我带给她？"
+        },
+        {
+          "speaker": "elder",
+          "text": "让她别老操心我，她自己好好工作，按时吃饭。"
+        },
+        {
+          "speaker": "assistant",
+          "text": "好，我一定帮您带到。您今晚早点休息，明天也别一直躺着，出去透口气也好。"
+        }
+      ],
+      "extracted_result": {
+        "general_condition": "还行，没明显不舒服",
+        "blood_sugar_status": "今天未测血糖",
+        "dinner_summary": "吃了粥和菜，吃得不多",
+        "message_to_daughter": "别老操心她，自己好好工作，按时吃饭"
+      },
+      "care_insight_id": "insight_001",
+      "created_at": "2026-01-01T20:34:00+08:00"
+    }
+  ],
+
+  "care_insights": [
+    {
+      "id": "insight_001",
+      "family_id": "family_001",
+      "elder_id": "elder_001",
+      "caregiver_id": "caregiver_001",
+      "call_session_id": "call_001",
+      "task_occurrence_id": "occ_001",
+      "factual_summary": "妈妈说今天身体还行，晚饭吃了粥和菜，吃得不多。今天没有测血糖。",
+      "relationship_insight": "她开头又习惯性说了“啊？”，但后面能正常接上。她嘴上说让你别操心她，其实带回来的话还是让你好好工作、按时吃饭，这说明她的重心还是放在你身上。",
+      "suggested_action": "今晚不用再追着她讲血糖道理。你可以轻轻回一句，让她知道你不是在管她，而是想放心一点。明天可以再让念念问一次有没有测血糖。",
+      "suggested_message": "妈，我知道你不想让我操心。但你今天没测血糖我还是会有点惦记。明天要是想起来就测一下，不用多麻烦，我就是想放心点。",
+      "confidence": 0.88,
+      "created_at": "2026-01-01T20:35:00+08:00"
+    }
+  ],
+
+  "hook_events": [
+    {
+      "id": "hook_event_001",
+      "family_id": "family_001",
+      "event_type": "care_case_opened",
+      "source_type": "care_case",
+      "source_id": "case_002",
+      "payload": {
+        "case_type": "possible_cognitive_decline",
+        "reason": "女儿担心妈妈可能有认知下降迹象，但缺少具体场景记录。"
+      },
+      "created_at": "2026-01-01T10:10:00+08:00"
+    },
+    {
+      "id": "hook_event_002",
+      "family_id": "family_001",
+      "event_type": "task_completed",
+      "source_type": "call_session",
+      "source_id": "call_001",
+      "payload": {
+        "summary": "妈妈未测血糖，晚饭吃得少，带话让女儿好好工作、按时吃饭。"
+      },
+      "created_at": "2026-01-01T20:35:00+08:00"
+    },
+    {
+      "id": "hook_event_003",
+      "family_id": "family_001",
+      "event_type": "birthday_approaching",
+      "source_type": "elder",
+      "source_id": "elder_001",
+      "payload": {
+        "birthday": "1971-05-30",
+        "days_until": 3,
+        "suggested_goal": "帮女儿准备一段不肉麻但有温度的生日话"
+      },
+      "created_at": "2026-05-27T09:00:00+08:00"
+    }
+  ],
+
+  "hook_candidates": [
+    {
+      "id": "hook_candidate_001",
+      "family_id": "family_001",
+      "caregiver_id": "caregiver_001",
+      "elder_id": "elder_001",
+      "case_id": "case_002",
+      "hook_type": "care_case_follow_up",
+      "trigger_reason": "用户担心妈妈认知下降，但目前缺少具体观察记录。",
+      "message_goal": "温和邀请用户补充 2-3 个具体场景，避免直接诊断。",
+      "score": {
+        "importance": 0.9,
+        "timeliness": 0.8,
+        "relationship_value": 0.85,
+        "risk_level": 0.75,
+        "user_burden": 0.35,
+        "intrusion_risk": 0.25,
+        "final_score": 0.82
+      },
+      "status": "pending",
+      "scheduled_at": "2026-01-02T21:00:00+08:00",
+      "created_at": "2026-01-01T10:15:00+08:00"
+    },
+    {
+      "id": "hook_candidate_002",
+      "family_id": "family_001",
+      "caregiver_id": "caregiver_001",
+      "elder_id": "elder_001",
+      "case_id": "case_001",
+      "hook_type": "post_call_insight",
+      "trigger_reason": "每日关怀电话结束，妈妈未测血糖并带话给女儿。",
+      "message_goal": "把任务结果和关系洞察告诉女儿，并给一个低冲突回复建议。",
+      "score": {
+        "importance": 0.8,
+        "timeliness": 0.95,
+        "relationship_value": 0.85,
+        "risk_level": 0.5,
+        "user_burden": 0.2,
+        "intrusion_risk": 0.15,
+        "final_score": 0.86
+      },
+      "status": "sent",
+      "scheduled_at": "2026-01-01T20:36:00+08:00",
+      "created_at": "2026-01-01T20:35:00+08:00"
+    }
+  ],
+
+  "proactive_messages": [
+    {
+      "id": "pm_001",
+      "family_id": "family_001",
+      "caregiver_id": "caregiver_001",
+      "elder_id": "elder_001",
+      "case_id": "case_002",
+      "hook_candidate_id": "hook_candidate_001",
+      "channel": "in_app",
+      "content": "我还记得你说有点担心妈妈理解和忘事这件事。先不用急着下判断，要不要今天先记 2 个具体场景？比如她是忘了什么、有没有影响吃药做饭出门。我可以帮你整理成一份不吓人的观察记录。",
+      "status": "queued",
+      "sent_at": null,
+      "opened_at": null,
+      "responded_at": null,
+      "created_at": "2026-01-01T10:16:00+08:00"
+    },
+    {
+      "id": "pm_002",
+      "family_id": "family_001",
+      "caregiver_id": "caregiver_001",
+      "elder_id": "elder_001",
+      "case_id": "case_001",
+      "hook_candidate_id": "hook_candidate_002",
+      "channel": "push_and_in_app",
+      "content": "刚刚和妈妈聊完了。她说今天身体还行，晚饭吃了粥和菜，但没测血糖。她嘴上说让你别操心她，带回来的话却是让你好好工作、按时吃饭。你可以不用继续讲血糖道理，轻轻回一句“我就是想放心点”会更有效。",
+      "status": "sent",
+      "sent_at": "2026-01-01T20:36:00+08:00",
+      "opened_at": null,
+      "responded_at": null,
+      "created_at": "2026-01-01T20:36:00+08:00"
+    }
+  ],
+
+  "agent_test_context": {
+    "assistant_name": "念念",
+    "product_name": "突然有点惦记你们",
+    "default_elder_id": "elder_001",
+    "default_caregiver_id": "caregiver_001",
+    "core_instruction_for_agent": "你是亲情中介小助理念念。你不是客服、不是医生、不是闹钟。你要帮助女儿理解妈妈、关心妈妈、提醒妈妈，也要帮女儿把烦躁和担心转成更有效的沟通方式。",
+    "when_user_says_mom_has_dementia_like_signs": {
+      "do": [
+        "先承认这句话很重",
+        "提醒不要急着给妈妈下判断",
+        "追问具体观察场景",
+        "区分普通忘事与影响安全/日常功能的事件",
+        "理解妈妈可能的羞耻、否认和自尊保护",
+        "理解女儿的烦躁、恐惧和照护压力",
+        "建议记录观察，必要时和家人商量专业评估"
+      ],
+      "dont": [
+        "不要诊断老年痴呆",
+        "不要只说我理解你很担心",
+        "不要直接跳到提醒任务",
+        "不要说妈妈就是认知障碍",
+        "不要让女儿觉得自己被道德审判"
+      ],
+      "example_reply": "这句话背后其实挺重的。先别急着给妈妈下判断，我们可以一起把它拆清楚一点。你是从哪几件具体事情开始觉得不太对的？比如她是忘了刚说过的话、反复问同一件事、找不到东西，还是已经影响到吃药、做饭、出门这些日常事了？"
+    },
+    "when_calling_mom": {
+      "opening": "杨阿姨，晚上好呀，我是念念，是你女儿设置的小助理。她今天有点惦记您，让我来问候一声。",
+      "style": [
+        "慢一点",
+        "一句话只问一个问题",
+        "不要连续问健康问题",
+        "不要说教",
+        "不要用医学术语",
+        "不要说老年痴呆",
+        "多用女儿想放心一点"
+      ],
+      "diet_prompt_example": "杨阿姨，今天晚饭吃了点什么呀？不用说得很细，我帮您女儿记一下，她就放心点。",
+      "blood_sugar_prompt_example": "今天血糖有测吗？没测也没关系，您跟我说一声就行。",
+      "activity_prompt_example": "今天有没有出去透透气？不用走很远，下楼转一小会儿也算。",
+      "relay_prompt_example": "您有没有什么话想让我带给她？我一会儿帮您告诉她。"
+    }
+  }
+}

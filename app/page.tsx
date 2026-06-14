@@ -1,7 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { VoiceCallModal } from "./components/VoiceCallModal";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSpeechSynthesis } from "./components/hooks/useSpeechSynthesis";
+import {
+  MAIN_TAB_BY_CATEGORY,
+  MAIN_TAB_LABEL,
+  SUB_CAT_LABEL,
+  type Candidate as ImportCandidate,
+  type MemoryCategoryValue,
+} from "@/src/lib/import-parsers/schemas/extract-result.schema";
 
 type TabKey = "home" | "tasks" | "notifications" | "profile" | "assistant";
 type MessageKind = "text" | "taskDraft" | "note" | "summary";
@@ -22,7 +29,9 @@ type TaskStatus =
   | "unconfirmed"
   | "timeout"
   | "cancelled"
-  | "need_review";
+  | "need_review"
+  | "not_done"
+  | "postponed";
 type NotificationLevel = "success" | "warning" | "danger" | "info" | "review";
 
 type Elder = {
@@ -43,7 +52,11 @@ type Elder = {
   relationshipMemories?: string[];
 };
 
-type MemoryCategory = "about_user" | "about_elder" | "relationship" | "communication_style" | "pending_review";
+type MemoryCategory =
+  | "about_user" | "about_elder" | "relationship" | "communication_style" | "pending_review"
+  | "elder_basic" | "elder_health" | "elder_habits" | "elder_contact"
+  | "rel_emotional" | "rel_history" | "rel_events" | "rel_preferences"
+  | "chat_language" | "chat_expression" | "chat_focus" | "chat_taboo";
 
 type MemoryEntry = {
   id: string;
@@ -51,6 +64,7 @@ type MemoryEntry = {
   content: string;
   source?: string;
   importance?: "high" | "medium" | "low";
+  elderId?: string;
   createdAt: string;
 };
 
@@ -173,19 +187,21 @@ type CallSession = {
   open: boolean;
   audience: UserMode;
   taskId: string | null;
-  phase: "dialing" | "connected" | "ended" | "missed";
+  elderId: string | null;      // 新增：锁定这通电话的长辈身份
+  sessionId: string | null;    // 新增：服务端会话 ID
+  phase: "dialing" | "connected" | "speaking" | "listening" | "ended" | "missed" | "loading";
+  // 动态对话状态（LLM 驱动）
+  callHistory: Array<{ role: "assistant" | "elder"; text: string }>;
+  currentSpeakText?: string;
+  currentStage?: string;   // greeting | warm_chat | task_reminder | relay | closing
+  elderResponses?: string[];
 };
 
-type AgentCallEntry = {
-  role: "assistant" | "elder";
+type CallTurn = {
   text: string;
-};
-
-type AgentCareInsight = {
-  factualSummary: string;
-  relationshipInsight: string;
-  suggestedAction: string;
-  suggestedMessage: string;
+  id: string;
+  waitResponse: boolean;
+  topic?: string;
 };
 
 type CallInsight = {
@@ -198,18 +214,6 @@ type CallInsight = {
   suggestedAction: string;
   suggestedMessage: string;
   createdAt: string;
-};
-
-type AgentCallState = {
-  active: boolean;
-  sessionId: string | null;
-  phase: "idle" | "dialing" | "connected" | "ended";
-  transcript: AgentCallEntry[];
-  stage: string;
-  taskSlots: Record<string, string>;
-  careInsight: AgentCareInsight | null;
-  isProcessing: boolean;
-  finalizeResult: { summary: string; memoriesExtracted: number; careInsightId: string | null } | null;
 };
 
 type StoredState = {
@@ -226,9 +230,30 @@ type StoredState = {
   callInsights: CallInsight[];
 };
 
+// ─── 身份锁定模型（2025-01新增）─────────────────────────────
+// 目的：统一「谁在用、以谁的身份调用」，避免「奶奶/妈妈」称呼错乱。
+// 持久化 key 与业务数据独立，不受 MEM_DATA_VERSION 重置影响。
+type Identity = {
+  role: "child" | "elder";
+  personId: string; // child → caregiverId；elder → elderId
+};
+
+type Caregiver = {
+  id: string;
+  displayName: string;
+  relation: string;
+};
+
 const STORAGE_KEY = "you-dian-dian-ji-demo";
+const MEM_DATA_VERSION = "v7_conversational_call";
+const IDENTITY_KEY = "memory_bridge_identity_v1";
+
+// Demo 阶段只有「小雨」一位子女；后续多人可扩充
+const CAREGIVERS: Caregiver[] = [
+  { id: "user_xiaoyu", displayName: "小雨", relation: "子女" },
+];
 const TABS: Array<{ key: TabKey; label: string }> = [
-  { key: "profile", label: "档案" },
+  { key: "assistant", label: "记忆库" },
   { key: "home", label: "小助理" },
   { key: "tasks", label: "任务" },
 ];
@@ -244,6 +269,32 @@ const QUICK_INPUTS = [
 ];
 
 const ELDER_QUICK_INPUTS = ["我已经吃药了", "电话里没听清，再说一遍", "今天我都做完了", "帮我告诉孩子我挺好的"];
+
+const MEM_SUB_CATS: Record<string, Array<{ key: MemoryCategory; label: string }>> = {
+  family_info: [
+    { key: "elder_basic", label: "基本信息" },
+    { key: "elder_health", label: "健康状况" },
+    { key: "elder_habits", label: "生活习惯" },
+    { key: "elder_contact", label: "联系方式" },
+  ],
+  relationship: [
+    { key: "rel_emotional", label: "情感纽带" },
+    { key: "rel_history", label: "互动历史" },
+    { key: "rel_events", label: "重要事件" },
+    { key: "rel_preferences", label: "特殊偏好" },
+  ],
+  chat_style: [
+    { key: "chat_language", label: "语言习惯" },
+    { key: "chat_expression", label: "表达方式" },
+    { key: "chat_focus", label: "关注重点" },
+    { key: "chat_taboo", label: "沟通禁忌" },
+  ],
+};
+const MEM_MAIN_TAB_CATS: Record<string, MemoryCategory[]> = {
+  family_info: ["about_elder", "about_user", "elder_basic", "elder_health", "elder_habits", "elder_contact", "pending_review"],
+  relationship: ["relationship", "rel_emotional", "rel_history", "rel_events", "rel_preferences"],
+  chat_style: ["communication_style", "chat_language", "chat_expression", "chat_focus", "chat_taboo"],
+};
 
 const DEFAULT_ASSISTANT_PROFILE: AssistantProfile = {
   tone: "温柔陪伴",
@@ -266,6 +317,8 @@ const STATUS_META: Record<
   timeout: { label: "暂未回应", className: "bg-rose-100 text-rose-700", dot: "🔴" },
   cancelled: { label: "已取消", className: "bg-stone-100 text-stone-700", dot: "⚪" },
   need_review: { label: "待查看", className: "bg-violet-100 text-violet-700", dot: "🟣" },
+  not_done: { label: "本次没做", className: "bg-amber-100 text-amber-700", dot: "🟡" },
+  postponed: { label: "已延后", className: "bg-amber-100 text-amber-700", dot: "🟡" },
 };
 
 function uid(prefix: string) {
@@ -296,8 +349,8 @@ function stampMessage(message: Message): Message {
 function buildTranscriptLines(messages: Message[], audience: "child" | "elder") {
   const roleMap =
     audience === "child"
-      ? { user: "子女", assistant: "小助理" }
-      : { user: "长辈", assistant: "小助理" };
+      ? { user: "子女", assistant: "念念" }
+      : { user: "长辈", assistant: "念念" };
 
   return messages.slice(-12).map((message) => `${roleMap[message.role]}：${message.content}`);
 }
@@ -516,28 +569,28 @@ function summarizeTasks(tasks: Task[], elder?: Elder | null) {
   const timeout = targetTasks.filter((task) => task.status === "timeout").length;
   const scope = elder ? `${elder.displayName}今天` : "今天";
 
-  return `${scope}惦记了 ${targetTasks.length} 件事：已完成 ${completed} 件，已确认 ${confirmed} 件，待跟进 ${pending} 件${timeout ? `，暂未回应 ${timeout} 件` : "。"} `;
+  return `${scope}惦记了${targetTasks.length}件事呢~已完成${completed}件，已确认${confirmed}件，待跟进${pending}件${timeout ? `，暂未回应${timeout}件` : "。"} `;
 }
 
 function buildAssistantPreview(profile: AssistantProfile, elderName: string) {
   const opening =
-    profile.tone === "温柔陪伴" ? `${elderName}，今天怎么样？` : `${elderName}，我来看看你。`;
+    profile.tone === "温柔陪伴" ? `${elderName}，今天怎么样呀~` : `${elderName}，我来找你聊天啦~`;
   const reminder =
     profile.rhythm === "简短清楚"
-      ? "要紧的事我轻轻提醒你一声。"
-      : "有要紧的事，我慢慢跟你说，不催你。";
+      ? "要紧的事我轻轻提醒你一声哦~"
+      : "有要紧的事，我慢慢跟你说呀，不催你的~";
   const followUp =
     profile.initiative === "少打扰"
-      ? "你先忙，方便了再回我就行。"
+      ? "你先忙，方便了再回我就好啦~"
       : profile.initiative === "多确认一次"
-        ? "要是你一会儿顾不上，我晚点再来问你。"
-        : "你想跟孩子说什么，也可以让我带句话。";
+        ? "要是你一会儿顾不上，我晚点再来问你呀~"
+        : "你想跟孩子说什么，也可以让我带句话哦~";
 
   return `${opening}${reminder}${followUp}`;
 }
 
 function buildCareReply(elderName: string) {
-  return `${elderName}，不着急，听到了就回我一声。要是今天有什么想说的，也可以直接告诉我。`;
+  return `${elderName}呀，不着急哦，您听到了回我一声就好啦~要是有啥想跟我说的，随时跟我说呀~`;
 }
 
 function rewriteRelayMessage(rawMessage: string, elderName: string, childName?: string): string {
@@ -568,54 +621,108 @@ function pickCareTopic(callCount: number): CareTopic {
   return rotation[callCount % rotation.length];
 }
 
-function buildCareQuestion(topic: CareTopic, elderName: string): string {
+function buildCareQuestion(topic: CareTopic): string {
   const questions: Record<CareTopic, string> = {
-    health: `${elderName}，最近身体感觉怎么样？有没有哪里不舒服？`,
-    daily_life: `${elderName}，这两天都忙些什么呢？有没有出去走走？`,
-    mood: `${elderName}，今天心情怎么样？有没有什么开心的事？`,
-    weather: `${elderName}，最近天气变化大，您要注意加减衣服呀。`,
-    food: `${elderName}，最近胃口怎么样？有没有好好吃饭？`,
-    family_update: `${elderName}，家里最近都挺好的吧？有没有什么需要帮忙的？`,
+    health: `最近身体怎么样呀？有没有哪里不太舒服的，跟我说说嘛~`,
+    daily_life: `这两天在干嘛呢？有没有出去逛逛呀？`,
+    mood: `今天心情好不好呀？有什么开心的事跟我讲讲嘛~`,
+    weather: `最近天气变来变去的，可要记得加减衣服呀，别着凉了~`,
+    food: `最近吃饭香不香呀？有没有好好吃饭，可不能随便对付哦~`,
+    family_update: `家里最近都挺好吧？有什么需要帮忙的尽管说呀~`,
   };
   return questions[topic];
 }
 
 function buildCallScript(task: Task | null, elder: Elder | null, relayMessage?: string) {
+  const turns = buildCallTurns(task, elder, relayMessage);
+  return turns.map((t) => t.text).join(" ");
+}
+
+/**
+ * 将通话脚本拆分为多个对话轮次，支持分段播放 + 等待回应。
+ * 每个轮次代表念念说的一段话，标注是否需要等待长辈回应。
+ */
+function buildCallTurns(task: Task | null, elder: Elder | null, relayMessage?: string): CallTurn[] {
   const elderName = elder?.displayName ?? "您";
+  const turns: CallTurn[] = [];
 
-  // Build staged conversation: greeting → relay → care → task → closing
-  const greeting = `${elderName}，晚上好呀。我是${elder?.relation ?? "家里"}那边的小助理，孩子今天有点惦记您，让我来问候一声。`;
+  // 轮次1：问候（不等待，短暂停顿后继续）
+  turns.push({
+    id: "greeting",
+    text: `您好呀~我是小雨设置的小助理念念，小雨今天惦记您啦，让我来跟您聊几句~`,
+    waitResponse: false,
+    topic: "问候",
+  });
 
-  let relayPart = "";
+  // 轮次2：转达消息（可选）
   if (relayMessage) {
     const rewritten = rewriteRelayMessage(relayMessage, elderName);
-    relayPart = rewritten;
+    turns.push({
+      id: "relay",
+      text: rewritten,
+      waitResponse: false,
+      topic: "转达",
+    });
   }
 
-  let taskPart = "";
+  // 轮次3：任务提醒（可选，等待回应确认）
   if (task) {
+    let taskText = "";
     if (task.type === "medication") {
-      taskPart = `对了，孩子托我提醒您一声：药记得按时吃。吃过了就跟我说一句，我也好让孩子放心。`;
+      taskText = `对了对了，小雨让我提醒您一下呀，药记得按时吃哦。吃完跟我说一声，我好跟小雨说一声~`;
     } else if (task.type === "health_measurement") {
-      taskPart = `还有件事，孩子想问问您今天方不方便量一下身体。等您测好了，慢慢告诉我一声就行。`;
+      const focusList = elder?.healthFocus ?? [];
+      const measureHint = focusList.length > 0 ? focusList[0] : "血糖";
+      taskText = `小雨还说让我提醒您呀，记得测一下${measureHint}哦。不用着急，等您方便了测一测就好~`;
     } else if (task.type === "call_back") {
-      taskPart = `孩子说方便的时候给您回个电话，您要是有空就接一下，不着急的。`;
+      taskText = `小雨说您方便的时候给您回个电话呢，您要是有空就接一下~`;
     } else {
-      taskPart = `孩子还让我提醒您：${task.content}。忙完了回我一句就好。`;
+      taskText = `小雨还让我提醒您一下：${task.content}。忙完了告诉我一声就好~`;
     }
+    turns.push({
+      id: "task",
+      text: taskText,
+      waitResponse: true,
+      topic: "提醒",
+    });
   }
 
-  const carePart = buildCareQuestion(pickCareTopic(Date.now() % 6), elderName);
-  const closing = `您要是还有什么想跟孩子说的，也可以直接告诉我，我帮您带到。`;
+  // 轮次4：关心话题（等待回应）
+  const topic = pickCareTopic(Date.now() % 6);
+  turns.push({
+    id: "care",
+    text: buildCareQuestion(topic),
+    waitResponse: true,
+    topic: "关心",
+  });
 
-  // Combine in natural order
-  const parts = [greeting];
-  if (relayPart) parts.push(relayPart);
-  if (taskPart) parts.push(taskPart);
-  parts.push(carePart);
-  parts.push(closing);
+  // 轮次5：结束语（不等待）
+  turns.push({
+    id: "closing",
+    text: `跟您聊天真开心~您要是有什么想跟小雨说的，也可以告诉我呀，我帮您带过去。那我先不打扰您啦，要注意身体哦~`,
+    waitResponse: false,
+    topic: "结束",
+  });
 
-  return parts.join(" ");
+  return turns;
+}
+
+/**
+ * 根据当前对话轮次返回预设回应按钮，方便长辈一键点击回应。
+ */
+function getPresetReplies(turnId: string): string[] {
+  switch (turnId) {
+    case "task":
+      return ["好的，我吃了", "等一下再吃", "已经吃过了"];
+    case "care":
+      return ["挺好的", "还行吧", "有点不舒服"];
+    case "relay":
+      return ["知道了", "好的", "谢谢念念"];
+    case "greeting":
+      return ["你好呀", "嗯嗯"];
+    default:
+      return ["好的", "知道了", "谢谢"];
+  }
 }
 
 function getLatestTaskForElder(tasks: Task[], elderId: string | null) {
@@ -634,28 +741,39 @@ function buildDemoState(): StoredState {
       id: "elder_mom",
       relation: "妈妈",
       displayName: "妈妈",
-      phone: "13800000001",
-      availableTime: "08:00-21:00",
-      focus: ["吃药", "复诊"],
-      communicationPreference: ["温柔一点", "简短一点"],
-      responseHabit: "上午更容易接电话",
+      phone: "13983879081",
+      availableTime: "08:30-21:30",
+      focus: ["测血糖", "吃药", "复诊"],
+      communicationPreference: ["温柔一点", "多聊家常", "别总提病情"],
+      responseHabit: "下午比较容易接电话；不喜欢被反复追问健康；聊到家人和辽阳老家会比较开心",
       nicknames: buildNicknames("妈妈", "妈妈"),
-      recentResponseAt: "10 分钟前",
-      oneLinePortrait: "总惦记你有没有好好吃饭",
-      healthFocus: ["血压", "降压药", "睡眠"],
-      recentSignals: ["最近提到有点头晕", "最近睡眠不太好"],
-      personalityTraits: ["嘴上说不用管，但接到电话会开心", "喜欢先聊两句再说正事"],
-      relationshipMemories: ["妈妈经常叮嘱你好好吃饭", "听说你加班会担心", "希望你有空回电话"],
+      recentResponseAt: "昨天 15:30",
+      oneLinePortrait: "嘴上说别管我，聊起老家就停不下来",
+      healthFocus: ["血糖", "甲状腺术后", "优甲乐", "运动", "体重"],
+      recentSignals: ["最近在西安和爸爸一起", "不太愿意测血糖", "社交变少了"],
+      personalityTraits: [
+        "蒙古族辽阳人，聊老家话题会开心",
+        "不喜欢被反复追问健康",
+        "接到子女电话会开心但不说",
+        "最近几年社交变少，子女担心心情",
+      ],
+      relationshipMemories: [
+        "妈妈是蒙古族辽阳人，喜欢聊老家",
+        "前年甲状腺切除手术，不太愿意提",
+        "小雨想让妈妈多运动多测血糖，但妈妈不太配合",
+        "妈妈最近几年社交变少了",
+        "妈妈最近在西安和爸爸一起生活",
+      ],
     },
     {
       id: "elder_dad",
       relation: "爸爸",
       displayName: "爸爸",
-      phone: "13800000002",
-      availableTime: "08:00-21:00",
+      phone: "13800002222",
+      availableTime: "07:00-22:00",
       focus: ["测血糖", "吃药"],
       communicationPreference: ["直接一点"],
-      responseHabit: "晚上不太看消息",
+      responseHabit: "上午容易接电话，晚上不怎么看手机",
       nicknames: buildNicknames("爸爸", "爸爸"),
       recentResponseAt: "昨天 20:10",
       oneLinePortrait: "不爱主动说累，总说自己没事",
@@ -663,6 +781,30 @@ function buildDemoState(): StoredState {
       recentSignals: ["血糖控制得不错"],
       personalityTraits: ["不喜欢被催", "嘴硬心软"],
       relationshipMemories: ["爸爸嘴上不说，但你打电话他会开心很久"],
+    },
+    {
+      id: "elder_grandma",
+      relation: "奶奶",
+      displayName: "奶奶",
+      phone: "13800001111",
+      availableTime: "08:00-21:00",
+      focus: ["吃药", "测血压"],
+      communicationPreference: ["温柔一点", "简短一点"],
+      responseHabit: "晚上比较容易接电话",
+      nicknames: buildNicknames("奶奶", "奶奶"),
+      oneLinePortrait: "嘴上说不用管，接到电话比谁都开心",
+      healthFocus: ["血压", "降压药", "睡眠"],
+      recentSignals: ["最近提到有点头晕"],
+      personalityTraits: [
+        "嘴上说不用孩子操心，但接到电话会开心",
+        "经常叮嘱小雨按时吃饭",
+        "喜欢先聊两句再说正事",
+      ],
+      relationshipMemories: [
+        "奶奶经常叮嘱小雨按时吃饭",
+        "奶奶嘴上说不用管，其实盼你回电话",
+        "希望你有空回电话",
+      ],
     },
   ];
 
@@ -720,14 +862,14 @@ function buildDemoState(): StoredState {
     {
       id: uid("notice"),
       title: "爸爸已完成测血糖",
-      detail: "回复：血糖 6.1。你可以放心一点了。",
+      detail: "回复：血糖 6.1 呢。你可以放心啦~",
       time: "2 分钟前",
       level: "success",
     },
     {
       id: uid("notice"),
       title: "妈妈暂时还没确认吃药提醒",
-      detail: "我已经提醒了两次，你可以晚点亲自打个电话。",
+      detail: "我已经提醒了两次啦~你可以晚点亲自打个电话哦。",
       time: "10 分钟前",
       level: "warning",
     },
@@ -738,7 +880,7 @@ function buildDemoState(): StoredState {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: "我会帮你把惦记整理成任务、回执和更温柔的话。你突然想起什么，直接告诉我就行。",
+      content: "我会帮你把惦记变成提醒、回执和更温柔的话哦~你突然想起什么，直接跟我说就好啦~",
     },
   ];
 
@@ -747,7 +889,7 @@ function buildDemoState(): StoredState {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: "你好呀，我是家里小助理。孩子惦记你的时候，我会温和地提醒你，也会顺口问问你今天怎么样。你想说什么，都可以直接回我。",
+      content: "你好呀~我是小助理念念，小雨让我来陪您说说话。您有什么想聊的，随时跟我说就好~",
     },
   ];
 
@@ -760,17 +902,96 @@ function buildDemoState(): StoredState {
     elderMessages,
     currentElderId: "elder_mom",
     assistantProfile: DEFAULT_ASSISTANT_PROFILE,
-    assistantMemories: [],
+    assistantMemories: [
+      {
+        dayKey: todayKey(),
+        dateLabel: todayKey().replaceAll("-", "."),
+        summary: "妈妈血糖今天没测，甲状腺药按时吃了；奶奶晚上接了电话，叮嘱你好好吃饭。",
+        childTranscript: ["子女：帮我每天提醒妈妈吃降压药"],
+        elderTranscript: ["长辈：我已经吃药了"],
+        updatedAt: nowLabel(),
+      },
+    ],
     memoryEntries: [
-      { id: uid("mem"), category: "about_user", content: "最近项目上线，经常加班", importance: "medium", createdAt: nowLabel() },
-      { id: uid("mem"), category: "about_user", content: "不太会直接表达关心", importance: "medium", createdAt: nowLabel() },
-      { id: uid("mem"), category: "about_elder", content: "妈妈不喜欢一上来就被问身体", importance: "high", createdAt: nowLabel() },
-      { id: uid("mem"), category: "about_elder", content: "晚上 8 点后比较愿意接电话", importance: "medium", createdAt: nowLabel() },
-      { id: uid("mem"), category: "relationship", content: "妈妈总叮嘱你好好吃饭", importance: "high", createdAt: nowLabel() },
-      { id: uid("mem"), category: "relationship", content: "她嘴上说不用管，其实盼你回电话", importance: "high", createdAt: nowLabel() },
-      { id: uid("mem"), category: "communication_style", content: "转达时不要太肉麻", importance: "low", createdAt: nowLabel() },
-      { id: uid("mem"), category: "communication_style", content: "用惦记比担心更合适", importance: "low", createdAt: nowLabel() },
-      { id: uid("mem"), category: "pending_review", content: "妈妈最近可能睡眠不好", importance: "medium", createdAt: nowLabel() },
+      // ═══════════════════════════════════════════════
+      // 关于子女 (relay_memory → about_user)
+      // ═══════════════════════════════════════════════
+      { id: uid("mem"), category: "about_user", content: "小雨最近项目上线，经常加班", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "about_user", content: "不太会直接表达关心，但一直很惦记家人", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "about_user", content: "小雨一直想让妈妈多运动、多测血糖，但妈妈不太配合", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "about_user", content: "小雨工作忙但一直惦记妈妈在西安的生活，希望妈妈多出去走走", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+
+      // ═══════════════════════════════════════════════
+      // 关于妈妈 杨艳梅 — 基本信息 (elder_basic)
+      // ═══════════════════════════════════════════════
+      { id: uid("mem"), category: "elder_basic", content: "妈妈全名杨艳梅，1971年5月30日出生，蒙古族，老家在辽阳", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "elder_basic", content: "妈妈是蒙古族辽阳人，喜欢聊老家的事，聊起来就停不下来", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "elder_basic", content: "妈妈最近在西安和爸爸一起生活，生活节奏比较慢", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+
+      // ═══════════════════════════════════════════════
+      // 关于妈妈 — 健康状况 (health_memory → elder_health)
+      // ═══════════════════════════════════════════════
+      { id: uid("mem"), category: "elder_health", content: "妈妈前年因甲状腺癌切除了甲状腺，目前需要长期服用优甲乐", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "elder_health", content: "妈妈术后恢复得还行，但一直不太愿意提及手术的事", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "elder_health", content: "妈妈需要每天按时服用优甲乐，不能漏服，这是术后管理的关键", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "elder_health", content: "妈妈患有糖尿病，但不喜欢监测血糖，对测血糖有抵触情绪", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+
+      // ═══════════════════════════════════════════════
+      // 关于妈妈 — 生活习惯 (routine_memory → elder_habits)
+      // ═══════════════════════════════════════════════
+      { id: uid("mem"), category: "elder_habits", content: "妈妈几乎不运动，体重偏重，但直接提减肥会引起反感", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "elder_habits", content: "妈妈最近几年很少向外社交，子女担心她的心情和社交状态", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "elder_habits", content: "妈妈不太配合多运动、多测血糖的建议，需要用关心而非命令的方式", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+
+      // ═══════════════════════════════════════════════
+      // 关于妈妈 — 联系方式 (preference_memory → elder_contact)
+      // ═══════════════════════════════════════════════
+      { id: uid("mem"), category: "elder_contact", content: "妈妈下午比较容易接电话；不喜欢被反复追问健康状况", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "elder_contact", content: "妈妈的手机号是13983879081，可以打电话也可以发App消息", importance: "low", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "elder_contact", content: "妈妈一般在早上8:30到晚上9:30之间比较方便接听", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+
+      // ═══════════════════════════════════════════════
+      // 关于妈妈 — 关系记忆 (relationship_memory → rel_*)
+      // ═══════════════════════════════════════════════
+      { id: uid("mem"), category: "relationship", content: "妈妈嘴上说别管我，其实盼你回电话", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "rel_emotional", content: "妈妈最近几年社交变少了，子女比较担心她的心情", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "rel_emotional", content: "妈妈接到子女电话会开心但不说出来，内心其实很盼望", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "rel_events", content: "前年妈妈做甲状腺切除手术是家里的一件大事，家人都很牵挂", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "rel_preferences", content: "聊到家人和辽阳老家，妈妈会比较开心，是拉近关系的好话题", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+
+      // ═══════════════════════════════════════════════
+      // 关于妈妈 — 沟通偏好 (preference_memory → chat_*)
+      // ═══════════════════════════════════════════════
+      { id: uid("mem"), category: "chat_expression", content: "妈妈希望被温柔对待，多聊家常，别总提病情", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "chat_expression", content: "语气要温暖轻松，像闺女唠嗑一样，不要说教", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "chat_focus", content: "先聊西安的生活、聊爸爸、聊家常，自然地关心健康，不要一上来就问血糖", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "chat_taboo", content: "不要说'你必须测血糖'，不要用命令的语气", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "chat_taboo", content: "不要过度强调病情严重性，不要说'甲状腺癌'这个词", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+      { id: uid("mem"), category: "chat_taboo", content: "不要说'你太胖了需要减肥'", importance: "high", elderId: "elder_mom", createdAt: nowLabel() },
+
+      // ═══════════════════════════════════════════════
+      // 关于妈妈 — 情绪信号 (emotional_signal → pending_review)
+      // ═══════════════════════════════════════════════
+      { id: uid("mem"), category: "pending_review", content: "妈妈最近可能睡眠不好", importance: "medium", elderId: "elder_mom", createdAt: nowLabel() },
+
+      // ═══════════════════════════════════════════════
+      // 关于奶奶
+      // ═══════════════════════════════════════════════
+      { id: uid("mem"), category: "elder_basic", content: "奶奶长期关注血压，晚上需要吃降压药", importance: "high", elderId: "elder_grandma", createdAt: nowLabel() },
+      { id: uid("mem"), category: "elder_contact", content: "奶奶晚上比较容易接电话", importance: "medium", elderId: "elder_grandma", createdAt: nowLabel() },
+      { id: uid("mem"), category: "rel_emotional", content: "奶奶经常叮嘱小雨按时吃饭", importance: "high", elderId: "elder_grandma", createdAt: nowLabel() },
+
+      // ═══════════════════════════════════════════════
+      // 关于爸爸
+      // ═══════════════════════════════════════════════
+      { id: uid("mem"), category: "elder_basic", content: "爸爸上午容易接电话，晚上不怎么看手机", importance: "medium", elderId: "elder_dad", createdAt: nowLabel() },
+      { id: uid("mem"), category: "elder_health", content: "爸爸在关注血糖和饮食控制", importance: "medium", elderId: "elder_dad", createdAt: nowLabel() },
+      { id: uid("mem"), category: "rel_emotional", content: "爸爸嘴上不说，但你打电话他会开心很久", importance: "high", elderId: "elder_dad", createdAt: nowLabel() },
+
+      // ═══════════════════════════════════════════════
+      // 通用沟通风格
+      // ═══════════════════════════════════════════════
+      { id: uid("mem"), category: "communication_style", content: "转达时不要太肉麻，用惦记比担心更合适", importance: "low", createdAt: nowLabel() },
     ],
     callInsights: [
       {
@@ -812,6 +1033,12 @@ function StatusBadge({ status }: { status: TaskStatus }) {
 export default function HomePage() {
   const [hydrated, setHydrated] = useState(false);
   const [userMode, setUserMode] = useState<UserMode | null>(null);
+  // 身份锁定：选过身份后下次进来不需要重选
+  const [identity, setIdentity] = useState<Identity | null>(null);
+  // 登录页内部步骤：null/'role' 选角色，'child'/'elder' 选具体人
+  const [loginStep, setLoginStep] = useState<"role" | "child" | "elder">("role");
+  // 右上角“我的身份”卡是否展开
+  const [identityCardOpen, setIdentityCardOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<TabKey>("home");
   const [isPeopleDrawerOpen, setIsPeopleDrawerOpen] = useState(false);
   const [elders, setElders] = useState<Elder[]>([]);
@@ -820,18 +1047,41 @@ export default function HomePage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [elderMessages, setElderMessages] = useState<Message[]>([]);
   const [assistantMemories, setAssistantMemories] = useState<AssistantMemory[]>([]);
-  const [memoryEntries, setMemoryEntries] = useState<MemoryEntry[]>([]);
+  const [memoryEntries, setMemoryEntries] = useState<MemoryEntry[]>(() => buildDemoState().memoryEntries);
   const [currentElderId, setCurrentElderId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [elderDetailId, setElderDetailId] = useState<string | null>(null);
   const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
   const [newMemoryText, setNewMemoryText] = useState("");
   const [newMemoryCategory, setNewMemoryCategory] = useState<MemoryCategory>("about_elder");
+  const [memMainTab, setMemMainTab] = useState<"family_info" | "relationship" | "chat_style">("family_info");
+  const [memSubTab, setMemSubTab] = useState<string>("all");
+  const [editingMemId, setEditingMemId] = useState<string | null>(null);
+  const [editingMemText, setEditingMemText] = useState("");
+  const [showAddMem, setShowAddMem] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importFilePreview, setImportFilePreview] = useState<string | null>(null);
+  // 导入记忆 - 增强版状态
+  type ImportCandidateWithSelection = ImportCandidate & { id: string; selected: boolean };
+  const [importStatus, setImportStatus] = useState<"idle" | "uploading" | "parsing" | "extracting" | "done" | "error">("idle");
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importCandidates, setImportCandidates] = useState<ImportCandidateWithSelection[]>([]);
+  const [importRawText, setImportRawText] = useState<string>("");
+  const [importFileMeta, setImportFileMeta] = useState<{ name: string; size: number; parser: string; durationMs: number } | null>(null);
+  const [importCandidateTab, setImportCandidateTab] = useState<"family_info" | "relationship" | "chat_style">("family_info");
+  const [ocrAvailable, setOcrAvailable] = useState<boolean | null>(null);
+  // 手动录入模式：用户放弃候选，改成手贴原文
+  const [importManualMode, setImportManualMode] = useState(false);
+  const [editingCandidateId, setEditingCandidateId] = useState<string | null>(null);
+  const [editingCandidateText, setEditingCandidateText] = useState("");
+  const [addMemSubCat, setAddMemSubCat] = useState<MemoryCategory>("elder_basic");
   const [taskCreateFlow, setTaskCreateFlow] = useState<TaskCreateFlow>({ step: "idle", rawText: "", targets: [], taskType: "other", remindLabel: "", repeatRule: "none", relayMessage: "", recommendedSlots: [] });
   const [callInsights, setCallInsights] = useState<CallInsight[]>([]);
   const [input, setInput] = useState("");
   const [elderInput, setElderInput] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isElderReplying, setIsElderReplying] = useState(false);
   const [isSummaryExpanded, setIsSummaryExpanded] = useState(true);
   const [showAddElder, setShowAddElder] = useState(false);
   const [editingElderId, setEditingElderId] = useState<string | null>(null);
@@ -840,25 +1090,16 @@ export default function HomePage() {
     open: false,
     audience: "child",
     taskId: null,
-    phase: "dialing",
-  });
-  const [agentCall, setAgentCall] = useState<AgentCallState>({
-    active: false,
+    elderId: null,
     sessionId: null,
-    phase: "idle",
-    transcript: [],
-    stage: "",
-    taskSlots: {},
-    careInsight: null,
-    isProcessing: false,
-    finalizeResult: null,
+    phase: "dialing",
+    callHistory: [],
   });
-  const [agentElderInput, setAgentElderInput] = useState("");
+  const [callInput, setCallInput] = useState("");
   const [schedulerResult, setSchedulerResult] = useState<string | null>(null);
-  // Voice call modal state
-  const [voiceCallOpen, setVoiceCallOpen] = useState(false);
-  const [voiceCallSessionId, setVoiceCallSessionId] = useState<string | null>(null);
-  const [voiceCallInitialText, setVoiceCallInitialText] = useState("");
+
+  // TTS for elder side call
+  const elderTTS = useSpeechSynthesis();
   const [elderForm, setElderForm] = useState<ElderFormState>({
     relation: "妈妈",
     displayName: "",
@@ -869,23 +1110,282 @@ export default function HomePage() {
     responseHabit: "",
   });
 
+  // ── Auto-scroll refs ──
+  const childChatScrollRef = useRef<HTMLDivElement>(null);
+  const elderChatScrollRef = useRef<HTMLDivElement>(null);
+  const prevMsgCountRef = useRef({ child: 0, elder: 0 });
+
+  // 导入记忆 - 模态框打开时探活 OCR 服务
   useEffect(() => {
-    const saved = window.localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved) as StoredState;
-      setUserMode(parsed.userMode ?? null);
-      setElders(parsed.elders);
-      setTasks(parsed.tasks);
-      setNotifications(parsed.notifications);
-      setMessages((parsed.messages ?? []).map(stampMessage));
-      setElderMessages((parsed.elderMessages ?? []).map(stampMessage));
-      setCurrentElderId(parsed.currentElderId);
-      setAssistantProfile(parsed.assistantProfile ?? DEFAULT_ASSISTANT_PROFILE);
-      setAssistantMemories(parsed.assistantMemories ?? []);
-      if (parsed.memoryEntries) setMemoryEntries(parsed.memoryEntries);
-      if (parsed.callInsights) setCallInsights(parsed.callInsights);
+    if (!showImportModal) {
+      setOcrAvailable(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/import-memory/health", { cache: "no-store" });
+        if (!res.ok) {
+          if (!cancelled) setOcrAvailable(false);
+          return;
+        }
+        const data = (await res.json()) as { ocrAvailable: boolean };
+        if (!cancelled) setOcrAvailable(data.ocrAvailable);
+      } catch {
+        if (!cancelled) setOcrAvailable(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [showImportModal]);
+
+  // 导入记忆 - handler 们
+  const resetImportModal = useCallback(() => {
+    setShowImportModal(false);
+    setImportText("");
+    setImportFilePreview(null);
+    setImportStatus("idle");
+    setImportError(null);
+    setImportCandidates([]);
+    setImportRawText("");
+    setImportFileMeta(null);
+    setImportCandidateTab("family_info");
+    setImportManualMode(false);
+    setEditingCandidateId(null);
+    setEditingCandidateText("");
+  }, []);
+
+  const handleImportFile = useCallback(async (file: File) => {
+    if (file.size > 10 * 1024 * 1024) {
+      setImportStatus("error");
+      setImportError("文件过大（10MB 上限），请压缩后重试");
+      return;
+    }
+    if (file.type.startsWith("image/")) {
+      setImportFilePreview(URL.createObjectURL(file));
+    } else {
+      setImportFilePreview(null);
+    }
+    setImportStatus("uploading");
+    setImportError(null);
+    setImportFileMeta({ name: file.name, size: file.size, parser: "上传中", durationMs: 0 });
+    setImportCandidates([]);
+
+    try {
+      setImportStatus("parsing");
+      const form = new FormData();
+      form.append("file", file);
+      const currentElder = elders.find((e) => e.id === currentElderId);
+      if (currentElder?.displayName) form.append("elderName", currentElder.displayName);
+
+      const res = await fetch("/api/import-memory", { method: "POST", body: form });
+      const data = (await res.json()) as {
+        rawText?: string;
+        candidates?: Array<{ id: string; category: MemoryCategoryValue; content: string; evidence: string; confidence: number }>;
+        parser?: string;
+        durationMs?: number;
+        error?: string;
+        code?: string;
+      };
+
+      if (!res.ok) {
+        setImportStatus("error");
+        setImportError(data.error ?? "上传失败");
+        setImportFileMeta(null);
+        return;
+      }
+
+      setImportStatus("extracting");
+      // candidates 是 LLM 抽取结果（API 已调过 LLM）
+      const rawText = data.rawText ?? "";
+      const cands = (data.candidates ?? []).map((c) => ({
+        ...c,
+        category: c.category as MemoryCategory,
+        selected: true,
+      }));
+      setImportRawText(rawText);
+      setImportCandidates(cands);
+      setImportFileMeta({
+        name: file.name,
+        size: file.size,
+        parser: data.parser ?? "unknown",
+        durationMs: data.durationMs ?? 0,
+      });
+      setImportStatus("done");
+      setImportCandidateTab(cands[0] ? MAIN_TAB_BY_CATEGORY[cands[0].category] : "family_info");
+    } catch (err) {
+      setImportStatus("error");
+      setImportError(err instanceof Error ? err.message : "网络错误");
+      setImportFileMeta(null);
+    }
+  }, [elders, currentElderId]);
+
+  const confirmImportCandidates = useCallback(() => {
+    const selected = importCandidates.filter((c) => c.selected);
+    if (selected.length === 0) return;
+    setMemoryEntries((prev) => [
+      ...prev,
+      ...selected.map((c) => ({
+        id: uid("mem"),
+        category: c.category,
+        content: c.content,
+        source: "import_ocr",
+        importance: "medium" as const,
+        createdAt: nowLabel(),
+      })),
+    ]);
+    resetImportModal();
+  }, [importCandidates, resetImportModal]);
+
+  const confirmManualImport = useCallback(() => {
+    const text = importText.trim();
+    if (!text) return;
+    const chunks = text.split(/\n\n+/).filter((s) => s.trim() && !s.startsWith("[待接入"));
+    const entries = chunks.length > 0 ? chunks : [text];
+    setMemoryEntries((prev) => [
+      ...prev,
+      ...entries.map((chunk) => ({
+        id: uid("mem"),
+        category: addMemSubCat,
+        content: chunk.trim(),
+        source: "import_ocr",
+        importance: "medium" as const,
+        createdAt: nowLabel(),
+      })),
+    ]);
+    resetImportModal();
+  }, [importText, addMemSubCat, resetImportModal]);
+
+
+  useEffect(() => {
+    const storedDataVer = window.localStorage.getItem(STORAGE_KEY + "_ver");
+    const needsFullReset = storedDataVer !== MEM_DATA_VERSION;
+
+    if (needsFullReset) {
+      // ── 版本不匹配：强制重置整个数据集为最新 buildDemoState ──
+      const demo = buildDemoState();
+      setUserMode(demo.userMode);
+      setElders(demo.elders);
+      setTasks(demo.tasks);
+      setNotifications(demo.notifications);
+      setMessages(demo.messages.map(stampMessage));
+      setElderMessages(demo.elderMessages.map(stampMessage));
+      setCurrentElderId(demo.currentElderId);
+      setAssistantProfile(demo.assistantProfile);
+      setAssistantMemories(demo.assistantMemories ?? []);
+      setMemoryEntries(demo.memoryEntries);
+      setCallInsights(demo.callInsights ?? []);
+      window.localStorage.setItem(STORAGE_KEY + "_ver", MEM_DATA_VERSION);
+    } else {
+      const saved = window.localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved) as StoredState;
+        setUserMode(parsed.userMode ?? null);
+        setElders(parsed.elders);
+        setTasks(parsed.tasks);
+        setNotifications(parsed.notifications);
+        setMessages((parsed.messages ?? []).map(stampMessage));
+        setElderMessages((parsed.elderMessages ?? []).map(stampMessage));
+        setCurrentElderId(parsed.currentElderId);
+        setAssistantProfile(parsed.assistantProfile ?? DEFAULT_ASSISTANT_PROFILE);
+        setAssistantMemories(parsed.assistantMemories ?? []);
+        if (parsed.memoryEntries && parsed.memoryEntries.length > 0) {
+          setMemoryEntries(parsed.memoryEntries);
+        }
+        if (parsed.callInsights) setCallInsights(parsed.callInsights);
+      }
     }
     setHydrated(true);
+  }, []);
+
+  // ─── 身份锁定加载（优先级：URL 参数 > localStorage IDENTITY_KEY）─────────────────────────────────────
+  // 独立于业务数据 load，避免被 demo.userMode = 'child' 覆盖。
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let next: Identity | null = null;
+    // 1. URL
+    try {
+      const url = new URL(window.location.href);
+      const urlRole = url.searchParams.get("role");
+      const urlPersonId = url.searchParams.get("personId");
+      if ((urlRole === "child" || urlRole === "elder") && urlPersonId) {
+        next = { role: urlRole, personId: urlPersonId };
+      }
+    } catch {
+      // URL 解析失败忽略
+    }
+    // 2. localStorage
+    if (!next) {
+      try {
+        const saved = window.localStorage.getItem(IDENTITY_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved) as Identity;
+          if ((parsed.role === "child" || parsed.role === "elder") && parsed.personId) {
+            next = parsed;
+          }
+        }
+      } catch {
+        // localStorage 解析失败忽略
+      }
+    }
+    if (next) {
+      setIdentity(next);
+      setUserMode(next.role);
+      if (next.role === "elder") {
+        setCurrentElderId(next.personId);
+      }
+    } else {
+      // 没有身份 → 强制走登录页，避免被 demo.userMode 默认 "child" 覆盖
+      setUserMode(null);
+    }
+  }, []);
+
+  // identity 持久化
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (identity) {
+      window.localStorage.setItem(IDENTITY_KEY, JSON.stringify(identity));
+    } else {
+      window.localStorage.removeItem(IDENTITY_KEY);
+    }
+  }, [identity]);
+
+  // 选择身份 → 同步到 userMode / currentElderId / URL
+  const selectIdentity = useCallback((role: "child" | "elder", personId: string) => {
+    const next: Identity = { role, personId };
+    setIdentity(next);
+    setUserMode(role);
+    if (role === "elder") {
+      setCurrentElderId(personId);
+    }
+    if (typeof window !== "undefined") {
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.set("role", role);
+        url.searchParams.set("personId", personId);
+        window.history.replaceState(null, "", url.toString());
+      } catch {
+        // URL 同步失败不阻断
+      }
+    }
+  }, []);
+
+  // 退出身份 / 重选
+  const clearIdentity = useCallback(() => {
+    setIdentity(null);
+    setUserMode(null);
+    setLoginStep("role");
+    if (typeof window !== "undefined") {
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("role");
+        url.searchParams.delete("personId");
+        window.history.replaceState(null, "", url.toString());
+      } catch {
+        // URL 清除失败不阻断
+      }
+    }
   }, []);
 
   useEffect(() => {
@@ -995,7 +1495,7 @@ export default function HomePage() {
       label: "已接通",
       hint: "确认对方接起",
       active: callSession.phase === "connected",
-      done: callSession.phase === "connected" || currentCallTask?.status === "reached" || currentCallTask?.status === "confirmed" || currentCallTask?.status === "completed",
+      done: callSession.phase === "connected" || callSession.phase === "speaking" || callSession.phase === "listening" || currentCallTask?.status === "reached" || currentCallTask?.status === "confirmed" || currentCallTask?.status === "completed",
       onClick: () => updateCallPhase("connected"),
     },
     {
@@ -1044,6 +1544,105 @@ export default function HomePage() {
     () => [...tasks].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
     [tasks],
   );
+
+  // ── Auto-scroll: smoothly scroll to the latest assistant message ──
+  const scrollToLatestAssistant = useCallback((immediate = false) => {
+    // Don't scroll during active submission
+    if (isSubmitting) return;
+
+    const container = userMode === "elder" ? elderChatScrollRef.current : childChatScrollRef.current;
+    if (!container) return;
+
+    const target = container.querySelector<HTMLElement>("[data-assistant-message]:last-of-type");
+    if (!target) return;
+
+    // Check if already visible near the bottom of viewport
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const distanceFromBottom = containerRect.bottom - targetRect.bottom;
+    if (distanceFromBottom >= -80 && distanceFromBottom <= 120) return;
+
+    const targetTop = target.offsetTop - 16;
+    container.scrollTo({
+      top: Math.max(0, targetTop),
+      behavior: immediate ? "auto" : "smooth",
+    });
+  }, [userMode, isSubmitting]);
+
+  // Scroll when switching tabs back to chat
+  useEffect(() => {
+    if (activeTab !== "home") return;
+    const frame = requestAnimationFrame(() => scrollToLatestAssistant());
+    return () => cancelAnimationFrame(frame);
+  }, [activeTab, scrollToLatestAssistant]);
+
+  // Scroll when new messages arrive (after API response)
+  useEffect(() => {
+    const prev = prevMsgCountRef.current;
+    const childGrew = messages.length > prev.child;
+    const elderGrew = elderMessages.length > prev.elder;
+    prevMsgCountRef.current = { child: messages.length, elder: elderMessages.length };
+
+    if (!childGrew && !elderGrew) return;
+    if (activeTab !== "home") return;
+
+    const frame = requestAnimationFrame(() => scrollToLatestAssistant());
+    return () => cancelAnimationFrame(frame);
+  }, [messages, elderMessages, activeTab, scrollToLatestAssistant]);
+
+  // ── 定时轮询：长辈端自动检查到期任务，触发来电 ──
+  useEffect(() => {
+    // 仅在长辈端且有长辈档案时启用
+    if (userMode !== "elder") return;
+    if (!currentElder) return;
+    // 如果通话界面已经打开，不检查
+    if (callSession.open) return;
+
+    let cancelled = false;
+
+    async function checkScheduledCall() {
+      if (cancelled) return;
+      try {
+        const res = await fetch("/api/scheduler/tick", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const triggered = data.triggered ?? [];
+        if (triggered.length > 0 && !cancelled) {
+          // 有到期的通话任务 → 自动打开来电界面
+          // 取第一个触发的任务
+          const first = triggered[0];
+          if (first && first.callSessionId) {
+            // 打开来电界面
+            setCallSession({
+              open: true,
+              audience: "elder",
+              taskId: first.taskOccurrenceId ?? null,
+              elderId: first.elderId ?? null,  // 新增：从调度器结果获取
+              sessionId: null,                  // 初始 null，接通后由 API 返回
+              phase: "dialing",
+              callHistory: [],
+            });
+          }
+        }
+      } catch {
+        // 静默失败，下次重试
+      }
+    }
+
+    // 立即检查一次
+    checkScheduledCall();
+    // 每 30 秒轮询一次
+    const interval = setInterval(checkScheduledCall, 30000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [userMode, currentElder, callSession.open]);
 
   function appendAssistantMessage(message: Message) {
     setMessages((prev) => [...prev, stampMessage(message)]);
@@ -1109,7 +1708,7 @@ export default function HomePage() {
         id: uid("msg"),
         role: "assistant",
         kind: "text",
-        content: `好，我把${updatedDisplayName}的档案更新好了。`,
+        content: `好啦~${updatedDisplayName}的档案已经更新好啦~以后有什么要帮忙的随时叫我呀！`,
       });
       return;
     }
@@ -1136,13 +1735,13 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `${elder.displayName}已经加入啦。以后没有特别说明时，我会默认先帮你照看 TA。`,
+      content: `${elder.displayName}加入啦~以后没有特别说明的话，我会先帮你照看TA哦。放心交给我吧~`,
     });
     appendElderMessage({
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `你好呀，${elder.displayName}。我是家里小助理，以后提醒、电话和小纸条都会从我这里来。`,
+      content: `你好呀~${elder.displayName}！我是念念呀，以后提醒、电话和小纸条都从我这儿出发哦~有什么事随时叫我！`,
     });
   }
 
@@ -1171,6 +1770,7 @@ export default function HomePage() {
     setMessages(demo.messages.map(stampMessage));
     setElderMessages(demo.elderMessages.map(stampMessage));
     setAssistantMemories(demo.assistantMemories ?? []);
+    setMemoryEntries(demo.memoryEntries ?? []);
     setCurrentElderId(demo.currentElderId);
     setAssistantProfile(demo.assistantProfile);
     setCallInsights(demo.callInsights ?? []);
@@ -1228,7 +1828,7 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `我已经帮你排好了，到了 ${draft.remindLabel} 会先联系${draft.elderDisplayName}。${draft.relayMessage ? `你说的那句${draft.relayMessage}，我也会转告给TA的。` : ""}`,
+      content: `帮你排好啦~到了${draft.remindLabel}，我会先联系${draft.elderDisplayName}的。${draft.relayMessage ? `你说的那句"${draft.relayMessage}"，我也帮你转告给TA呀~` : "你放心交给我吧~"}`,
     });
   }
 
@@ -1244,12 +1844,16 @@ export default function HomePage() {
   function applyTaskStatus(task: Task, status: TaskStatus, result?: string) {
     updateTask(task.id, (current) => {
       const logs = [...current.logs];
+      // T0 修复：事件 log 不要写死“回复：知道了”，会令子女误以为长辈真说了
+      // 改为 “接通了电话” 或 “回复：<真实内容>”
       let event = "状态已更新";
       if (status === "reached") event = `${current.elderDisplayName}已接听，提醒已触达`;
-      if (status === "confirmed") event = `${current.elderDisplayName}回复：知道了`;
+      if (status === "confirmed") event = result ? `${current.elderDisplayName}回复：${result}` : `${current.elderDisplayName}接通了电话`;
       if (status === "completed") event = `${current.elderDisplayName}回复：${result ?? "做完了"}`;
       if (status === "need_review") event = `${current.elderDisplayName}有一条回复待查看`;
       if (status === "timeout") event = "两次提醒后仍未确认，已通知家属";
+      if (status === "not_done") event = result ? `${current.elderDisplayName}回复：${result}` : `${current.elderDisplayName}这次还没做`;
+      if (status === "postponed") event = result ? `${current.elderDisplayName}回复：${result}` : `${current.elderDisplayName}需要再提醒一次`;
 
       const nextTask = {
         ...current,
@@ -1264,41 +1868,48 @@ export default function HomePage() {
     if (status === "reached") {
       addNotification({
         title: `${task.elderDisplayName}已接到提醒`,
-        detail: `${task.title} 已触达，接下来等待确认回执。`,
+        detail: `${task.title}已经触达啦，接下来等TA确认就好~`,
         level: "info",
       });
     }
 
     // ─── Step 4 & 5: Insight generation + warm receipt ───────────────
+    // T0 修复：去除“知道了收到了 / 语气是开心的 / 指标出来啦”三类幻觉
+    // 原则：factualSummary 只取真实 result；relationshipInsight 不给“情绪画像”；
+    //       suggestedAction 只在 capturedValue 真实存在时才说“指标”
     if (status === "confirmed" || status === "completed") {
       const elder = elders.find((e) => e.id === task.elderId);
       const elderName = task.elderDisplayName;
+      const hasRealResult = Boolean(result && result.trim() && result.trim() !== "电话已确认" && result.trim() !== "电话回访确认已完成");
 
-      // Build warm receipt message (Step 5)
+      // factualParts：仅“接通了电话” 或 “<长辈原话>” 二选一，不抷测
       const factualParts: string[] = [];
-      if (status === "completed" && result) {
-        factualParts.push(result);
-      } else if (status === "confirmed") {
-        factualParts.push("知道了，收到了");
+      if (hasRealResult) {
+        factualParts.push(result!.trim());
+      } else {
+        factualParts.push(`${elderName}接通了电话`);
       }
       if (task.relayMessage) {
-        factualParts.push(`你托我传的那句话（${task.relayMessage}），我也转告给TA了`);
+        factualParts.push(`你托我传的那句话（${task.relayMessage}），我转告给TA了`);
       }
 
-      // Build relationship insight (Step 4)
-      const traits = elder?.personalityTraits ?? [];
-      const hasProudTrait = traits.some((t) => t.includes("嘴") || t.includes("不说") || t.includes("硬"));
-      const relationshipInsight = hasProudTrait
-        ? `${elderName}嘴上不说什么，但接到电话时语气是开心的。TA不太会主动表达想念，但每次你联系TA，TA都会高兴很久。`
-        : `${elderName}今天聊得挺好的。TA听说你惦记TA，应该挺欣慰的。`;
+      // relationshipInsight：只描述“接了电话”这个事实，不写死“语气是开心的”
+      const relationshipInsight = hasRealResult
+        ? `${elderName}跟念念说了几句~要看TA原话可以点上面的总结哈~`
+        : `${elderName}这会儿接通了电话，但没说太多话~要是你想知道具体什么情况，可以再打一个~`;
 
-      const suggestedAction = task.type === "medication"
-        ? `${elderName}的药已经确认了，你可以放心。这两天如果有空，给TA回个电话比发消息更好。`
-        : task.type === "health_measurement"
-          ? `${elderName}的指标出来了，情况还不错。你可以安心忙你的，周末有空再联系TA。`
-          : `${elderName}已经收到你的惦记了。如果你今晚有几分钟，给TA回个电话，TA会很高兴。`;
+      // suggestedAction：health_measurement + 真实有 capturedValue 才说“指标”，
+      // 否则说中性话术，避免“指标出来啦”幻觉
+      const looksLikeNumber = hasRealResult && /[\d.]/.test(result!);
+      const suggestedAction = task.type === "health_measurement"
+        ? (looksLikeNumber
+            ? `${elderName}的指标是 ${result!.trim()}，你记一下~这两天要是有空跟TA聊聊~`
+            : `${elderName}接了电话，但念念还没听清TA说做了没~你可以过会儿再问问~`)
+        : task.type === "medication"
+          ? `${elderName}接了电话，念念已经把这件事告诉他了~你这几天要是想问一眼，随时联系TA~`
+          : `${elderName}接到了你的惦记~要是今晚有几分钟的话，给TA回个电话吧~`;
 
-      const suggestedMessage = `刚听说你挺好的，我就放心了。最近有点忙，但一直惦记你。`;
+      const suggestedMessage = `听说你挺好的，我就放心啦~最近有点忙，但一直惦记着你呢~`;
 
       // Create insight
       const insight: CallInsight = {
@@ -1315,7 +1926,7 @@ export default function HomePage() {
       setCallInsights((prev) => [insight, ...prev].slice(0, 20));
 
       // Send warm receipt to child
-      const warmReceipt = `${elderName}刚刚接了电话。${factualParts.length > 0 ? `TA说：${factualParts.join("，")}。` : ""}${relationshipInsight} ${suggestedAction}`;
+      const warmReceipt = `${elderName}刚刚接了电话啦~${factualParts.length > 0 ? `TA说：${factualParts.join("，")}。` : ""}${relationshipInsight} ${suggestedAction}`;
 
       addNotification({
         title: `${elderName}刚刚回复了`,
@@ -1346,7 +1957,7 @@ export default function HomePage() {
         newMemories.push({
           id: uid("mem"),
           category: "relationship",
-          content: `你让小助理给${elderName}带了句话：${task.relayMessage}`,
+          content: `你让念念给${elderName}带了句话：${task.relayMessage}`,
           source: `通话: ${task.title}`,
           importance: "medium",
           createdAt: nowLabel(),
@@ -1360,14 +1971,14 @@ export default function HomePage() {
     if (status === "need_review") {
       addNotification({
         title: `${task.elderDisplayName}有一条回复待查看`,
-        detail: "系统还没完全听懂，建议你点开任务详情看一下。",
+        detail: "我还没完全听明白呢，要不你点开详情看一下呀~",
         level: "review",
       });
     }
     if (status === "timeout") {
       addNotification({
         title: `${task.elderDisplayName}暂时还没回应`,
-        detail: "我已经尝试两次提醒。你可以稍后亲自联系一下。",
+        detail: "我已经试了两次啦~你可以稍后亲自联系一下哦。",
         level: "warning",
       });
 
@@ -1376,7 +1987,7 @@ export default function HomePage() {
         id: uid("msg"),
         role: "assistant",
         kind: "text",
-        content: `${task.elderDisplayName}两次都没接到电话，可能有事在忙。你要是方便，直接给TA打个电话会更好。`,
+        content: `${task.elderDisplayName}两次都没接到电话呢，可能在忙吧~你要是方便的话，直接给TA打个电话会更好哦~`,
       });
     }
   }
@@ -1392,7 +2003,7 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `这张小纸条我已经替你备好了：${version.text}`,
+      content: `小纸条已经帮你准备好啦~内容是：${version.text}`,
     });
     appendElderMessage({
       id: uid("msg"),
@@ -1407,29 +2018,26 @@ export default function HomePage() {
       open: true,
       audience,
       taskId: task?.id ?? null,
+      elderId: currentElderId,  // 新增：锁定当前长辈身份
+      sessionId: null,
       phase: "dialing",
+      callHistory: [],
     });
   }
 
   function updateCallPhase(phase: CallSession["phase"]) {
     setCallSession((prev) => ({ ...prev, phase }));
     const task = tasks.find((item) => item.id === callSession.taskId) ?? latestElderTask;
+
+    // 长辈端接通：调用对话 API 获取开场问候
+    if (phase === "connected" && callSession.audience === "elder") {
+      startElderCallConversation();
+    }
+
     if (!task) return;
 
     if (phase === "connected") {
       applyTaskStatus(task, "reached");
-      appendElderMessage({
-        id: uid("msg"),
-        role: "assistant",
-        kind: "text",
-        content: `${task.elderDisplayName}，我是家里小助理。刚刚用电话提醒和你说一声：${task.content}`,
-      });
-      appendElderMessage({
-        id: uid("msg"),
-        role: "assistant",
-        kind: "text",
-        content: buildCareReply(task.elderDisplayName),
-      });
     }
 
     if (phase === "missed") {
@@ -1443,204 +2051,287 @@ export default function HomePage() {
     }
   }
 
-  function closeCall() {
-    setCallSession((prev) => ({ ...prev, open: false, phase: "ended" }));
-  }
+  /** 启动长辈端对话：调用 API 获取开场问候并播放 */
+  async function startElderCallConversation() {
+    setCallSession((prev) => ({ ...prev, phase: "loading" }));
 
-  // ─── Voice Call Handler ────────────────────────────────────────────────
-  async function startAgentCall() {
-    // Open modal immediately with a connecting state
-    setVoiceCallSessionId(null);
-    setVoiceCallInitialText("");
-    setVoiceCallOpen(true);
+    if (!callSession.elderId) {
+      // 没有 elderId，无法启动对话
+      setCallSession((prev) => ({ ...prev, phase: "ended" }));
+      return;
+    }
 
     try {
-      // Fetch occurrences to find one we can call
-      const occRes = await fetch("/api/task-occurrences");
-      const occurrences = await occRes.json();
+      // start 只传 ID，服务端查库锁定上下文
+      const res = await fetch("/api/elder-call-conversation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "start",
+          elderId: callSession.elderId,
+          taskOccurrenceId: callSession.taskId,  // 可选
+          caregiverId: "user_xiaoyu",
+        }),
+      });
 
-      // Find an occurrence that hasn't been called yet, or use the most recent one
-      const callableOcc = Array.isArray(occurrences)
-        ? occurrences.find((o: { status: string }) => o.status === "pending" || o.status === "in_progress") ?? occurrences[occurrences.length - 1]
-        : null;
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "对话启动失败");
 
-      if (!callableOcc) {
-        // No occurrences - try triggering scheduler first
-        const tickRes = await fetch("/api/scheduler/tick", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-        const tickData = await tickRes.json();
-        if (tickData.triggered && tickData.triggered.length > 0) {
-          const occId = tickData.triggered[0].callSessionId;
-          const sessionRes = await fetch(`/api/calls/${occId}`);
-          const sessionData = await sessionRes.json();
-          const initialReply = sessionData.transcript?.[0]?.text ?? "你好呀，我是家里的小助理。";
-          setVoiceCallSessionId(occId);
-          setVoiceCallInitialText(initialReply);
-          return;
-        }
-        // No tasks at all
-        setVoiceCallOpen(false);
-        setAgentCall({
-          active: true,
-          sessionId: null,
-          phase: "ended",
-          transcript: [{ role: "assistant", text: "当前没有可调度的任务实例，请先通过调度器Tick创建。" }],
-          stage: "",
-          taskSlots: {},
-          careInsight: null,
-          isProcessing: false,
-          finalizeResult: null,
+      const reply = data.reply?.trim() || `您好呀~我是小雨设置的小助理念念，小雨让我来跟您聊几句~`;
+      const history = [{ role: "assistant" as const, text: reply }];
+
+      setCallSession((prev) => ({
+        ...prev,
+        sessionId: data.sessionId,  // 新增：保存 sessionId
+        phase: "speaking",
+        callHistory: history,
+        currentSpeakText: reply,
+        currentStage: data.stage ?? "greeting",
+        elderResponses: [],
+      }));
+
+      setTimeout(() => playElderTurn(reply, data.shouldEndCall ?? false), 400);
+    } catch {
+      // 降级：用预设开场白
+      const elderName = currentElder?.displayName ?? "您";
+      const fallback = `您好呀~我是小雨设置的小助理念念，小雨让我来跟您聊几句，您现在方便吗？`;
+      const history = [{ role: "assistant" as const, text: fallback }];
+      setCallSession((prev) => ({
+        ...prev,
+        phase: "speaking",
+        callHistory: history,
+        currentSpeakText: fallback,
+        currentStage: "greeting",
+        elderResponses: [],
+      }));
+      setTimeout(() => playElderTurn(fallback, false), 400);
+    }
+  }
+
+  /** 播放长辈端某一段 TTS 语音（T0 修复：强制服务端 TTS） */
+  function playElderTurn(text: string, isCallEnding: boolean) {
+    elderTTS.stop();
+    elderTTS.speak({
+      text,
+      rate: 0.9,
+      pitch: 1.05,
+      volume: 0.85,
+      forceServer: true,
+      onProviderDetected: (ttsProvider) => {
+        console.log("[elder_call_turn]", {
+          phase: "tts",
+          elderInput: callSession.callHistory?.[callSession.callHistory.length - 1]?.text ?? "",
+          assistantReply: text,
+          ttsProvider,
+          isCallEnding,
         });
+      },
+      onEnd: () => {
+        if (isCallEnding) {
+          // 通话应该结束
+          setTimeout(() => {
+            setCallSession((p) => ({ ...p, phase: "ended" }));
+          }, 800);
+        } else {
+          // 进入聆听状态，等待长辈回应
+          setCallSession((prev) => ({ ...prev, phase: "listening" }));
+        }
+      },
+      onError: (err) => {
+        // T0 修复：服务端 TTS 不可用时 console 报错，不静默 fallback
+        console.error("[elder_call_turn] TTS 失败：", err);
+      },
+    });
+  }
+
+  /** 处理长辈的回应：调用对话 API 获取下一轮回复 */
+  async function handleElderResponse(responseText: string) {
+    // 记录长辈回应
+    const responses = [...(callSession.elderResponses ?? []), responseText];
+    const elderEntry = { role: "elder" as const, text: responseText };
+    const history = [...callSession.callHistory, elderEntry];
+
+    setCallSession((prev) => ({
+      ...prev,
+      phase: "loading",
+      elderResponses: responses,
+      callHistory: history,
+    }));
+
+    try {
+      // 使用 continue action，传 sessionId，服务端从 session 加载上下文
+      const res = await fetch("/api/elder-call-conversation", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "continue",
+          sessionId: callSession.sessionId,
+          elderInput: responseText,
+        }),
+      });
+
+      // session 过期，重新创建
+      if (res.status === 410) {
+        // T0 修复：不抦断通话、不说"不打扰您"。重启一个新 session、复用同样的问候语，让长辈感觉到通话没断
+        const elderName = currentElder?.displayName ?? "妈";
+        const restartFallback = `抱歉${elderName}刚才信号不太好，念念再连一下哈~`;
+        try {
+          const restartRes = await fetch("/api/elder-call-conversation", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              action: "start",
+              elderId: callSession.elderId,
+              taskOccurrenceId: callSession.taskId,
+              caregiverId: "user_xiaoyu",
+            }),
+          });
+          const restartData = await restartRes.json();
+          if (restartRes.ok) {
+            const newReply = restartData.reply?.trim() || restartFallback;
+            const newHistory = [...history, { role: "assistant" as const, text: newReply }];
+            setCallSession((prev) => ({
+              ...prev,
+              sessionId: restartData.sessionId,
+              phase: "speaking",
+              callHistory: newHistory,
+              currentSpeakText: newReply,
+              currentStage: restartData.stage ?? "greeting",
+              elderResponses: [],
+            }));
+            setTimeout(() => playElderTurn(newReply, false), 300);
+            return;
+          }
+        } catch {
+          // restart 也失败了 → 降级到温和兑底，不挂断
+        }
+        const newHistory = [...history, { role: "assistant" as const, text: restartFallback }];
+        setCallSession((prev) => ({
+          ...prev,
+          phase: "speaking",
+          callHistory: newHistory,
+          currentSpeakText: restartFallback,
+          currentStage: "warm_chat",
+        }));
+        setTimeout(() => playElderTurn(restartFallback, false), 300);
         return;
       }
 
-      // Start the call via API
-      const startRes = await fetch("/api/calls/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task_occurrence_id: callableOcc.id }),
-      });
-      const startData = await startRes.json();
-
-      if (!startRes.ok) {
-        throw new Error(startData.error ?? "Failed to start call");
-      }
-
-      // Populate the modal with session data
-      setVoiceCallSessionId(startData.call_session_id);
-      setVoiceCallInitialText(startData.initial_reply ?? "你好呀，我是家里的小助理。");
-    } catch (err) {
-      setVoiceCallOpen(false);
-      setAgentCall({
-        active: true,
-        sessionId: null,
-        phase: "ended",
-        transcript: [{ role: "assistant", text: `呼叫失败: ${err instanceof Error ? err.message : "未知错误"}` }],
-        stage: "",
-        taskSlots: {},
-        careInsight: null,
-        isProcessing: false,
-        finalizeResult: null,
-      });
-    }
-  }
-
-  async function sendAgentTurn() {
-    const trimmed = agentElderInput.trim();
-    if (!trimmed || agentCall.isProcessing || !agentCall.sessionId) return;
-
-    // Add elder message to transcript
-    setAgentCall((prev) => ({
-      ...prev,
-      isProcessing: true,
-      transcript: [...prev.transcript, { role: "elder" as const, text: trimmed }],
-    }));
-    setAgentElderInput("");
-
-    try {
-      const res = await fetch(`/api/calls/${agentCall.sessionId}/turn`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ speaker: "elder", elder_input: trimmed }),
-      });
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "回复失败");
 
-      if (!res.ok) throw new Error(data.error ?? "Turn failed");
+      const reply = data.reply?.trim() || "嗯嗯，我都记下来啦~";
+      const newHistory = [...history, { role: "assistant" as const, text: reply }];
 
-      setAgentCall((prev) => ({
-        ...prev,
-        isProcessing: false,
-        stage: data.stage ?? prev.stage,
-        taskSlots: data.task_slots ?? prev.taskSlots,
-        transcript: [
-          ...prev.transcript,
-          { role: "assistant" as const, text: data.assistant_reply ?? "..." },
-        ],
-      }));
-
-      // Auto-finalize if call is ending
-      if (data.is_call_ending) {
-        setTimeout(() => finalizeAgentCall(), 800);
-      }
-    } catch (err) {
-      setAgentCall((prev) => ({
-        ...prev,
-        isProcessing: false,
-        transcript: [
-          ...prev.transcript,
-          { role: "assistant" as const, text: `处理失败: ${err instanceof Error ? err.message : "未知错误"}` },
-        ],
-      }));
-    }
-  }
-
-  async function finalizeAgentCall() {
-    if (!agentCall.sessionId) return;
-    setAgentCall((prev) => ({ ...prev, isProcessing: true }));
-
-    try {
-      const res = await fetch(`/api/calls/${agentCall.sessionId}/finalize`, {
-        method: "POST",
-      });
-      const data = await res.json();
-
-      if (!res.ok) throw new Error(data.error ?? "Finalize failed");
-
-      // Fetch care insight
-      let insight: AgentCareInsight | null = null;
-      if (data.care_insight_id) {
-        const insightRes = await fetch(`/api/care-insights`);
-        const insights = await insightRes.json();
-        const found = Array.isArray(insights)
-          ? insights.find((i: { id: string }) => i.id === data.care_insight_id)
-          : null;
-        if (found) {
-          insight = {
-            factualSummary: found.factualSummary ?? "",
-            relationshipInsight: found.relationshipInsight ?? "",
-            suggestedAction: found.suggestedAction ?? "",
-            suggestedMessage: found.suggestedMessage ?? "",
-          };
+      // 根据服务端返回的 capturedTaskStatus 更新任务状态
+      // T0 修复：not_done / postponed 不能再标为 "confirmed"（那会写入"知道了收到了"幻觉 + "语气是开心的"）
+      // 这两个状态需要子女亲自确认，先标 need_review 让子女决定
+      const task = tasks.find((item) => item.id === callSession.taskId) ?? latestElderTask;
+      if (task && data.capturedTaskStatus) {
+        const status = data.capturedTaskStatus.status;
+        if (status === "done") {
+          applyTaskStatus(task, "completed", responseText);
+        } else if (status === "not_done") {
+          applyTaskStatus(task, "not_done", responseText);
+        } else if (status === "postponed") {
+          applyTaskStatus(task, "postponed", responseText);
+        } else if (status === "needs_help") {
+          applyTaskStatus(task, "need_review", responseText);
         }
       }
 
-      setAgentCall((prev) => ({
+      // P0-3: 通话结束/有结果时，编译一份子女端可读回执推到聊天区
+      if (data.shouldEndCall && userMode === "child") {
+        const captured = data.capturedTaskStatus;
+        const intent = data.intent as string | undefined;
+        const elderDisplayName = currentElder?.displayName ?? "长辈";
+        const lines: string[] = [];
+        lines.push(`📞 和${elderDisplayName}的提醒电话结束了~`);
+
+        // 1) 事实摘要：用 captured 的 note 作为原始依据
+        if (captured?.note) {
+          lines.push(`${elderDisplayName}说：${captured.note}`);
+        }
+        // 2) 健康异常 → 升级提示
+        if (data.healthAlert || captured?.status === "health_abnormal") {
+          lines.push(`⚠️ TA提了健康相关情况，建议你尽快联系一下。`);
+        }
+        // 3) 任务状态
+        if (captured?.status === "done") {
+          lines.push(`✅ 任务算完成了。`);
+        } else if (captured?.status === "not_done") {
+          lines.push(`⏳ 这次还没做。`);
+        } else if (captured?.status === "postponed") {
+          lines.push(`🕐 延后了。`);
+        } else if (captured?.status === "needs_help") {
+          lines.push(`❓ 需要帮助（${captured.issue ?? "看上下文"}）。`);
+        }
+        // 4) 留言转达
+        if (data.relayMessage) {
+          lines.push(`💬 ${elderDisplayName}想跟你说：${data.relayMessage}`);
+        }
+        // 5) 拟建议（给子女的）
+        if (captured?.status === "done") {
+          lines.push(`👉 你可以在合适的时候问候一下，或者把这次结果分享给家人。`);
+        } else if (captured?.status === "not_done" || captured?.status === "postponed") {
+          lines.push(`👉 下次再提醒一下，或者你亲自问问。`);
+        }
+        appendAssistantMessage({
+          id: uid("msg"),
+          role: "assistant",
+          kind: "summary",
+          content: lines.join("\n"),
+        });
+      }
+
+      setCallSession((prev) => ({
         ...prev,
-        phase: "ended",
-        isProcessing: false,
-        careInsight: insight,
-        finalizeResult: {
-          summary: data.summary ?? "",
-          memoriesExtracted: data.memories_extracted ?? 0,
-          careInsightId: data.care_insight_id ?? null,
-        },
+        phase: "speaking",
+        callHistory: newHistory,
+        currentSpeakText: reply,
+        currentStage: data.stage ?? "warm_chat",
       }));
-    } catch (err) {
-      setAgentCall((prev) => ({
+
+      setTimeout(() => playElderTurn(reply, data.shouldEndCall ?? false), 300);
+    } catch {
+      // 降级：简单回应（T0 修复：不抦断通话、不说"不打扰您"，温和继续）
+      const elderName = currentElder?.displayName ?? "妈";
+      const fallback = `嗯嗯${elderName}，我记下来啦~${elderName}继续跟我说呗~`;
+      const newHistory = [...history, { role: "assistant" as const, text: fallback }];
+      setCallSession((prev) => ({
         ...prev,
-        phase: "ended",
-        isProcessing: false,
-        transcript: [
-          ...prev.transcript,
-          { role: "assistant" as const, text: `结算失败: ${err instanceof Error ? err.message : "未知错误"}` },
-        ],
+        phase: "speaking",
+        callHistory: newHistory,
+        currentSpeakText: fallback,
+        currentStage: "warm_chat",
       }));
+      setTimeout(() => playElderTurn(fallback, false), 300);
     }
   }
 
-  function closeAgentCall() {
-    setAgentCall({
-      active: false,
-      sessionId: null,
-      phase: "idle",
-      transcript: [],
-      stage: "",
-      taskSlots: {},
-      careInsight: null,
-      isProcessing: false,
-      finalizeResult: null,
-    });
-    setAgentElderInput("");
+  /** 跳过当前等待，用默认回应推进对话 */
+  function skipToNextTurn() {
+    handleElderResponse("好的，知道了");
   }
+
+  function closeCall() {
+    elderTTS.stop();
+    setCallSession((prev) => ({
+      ...prev,
+      open: false,
+      phase: "ended",
+      callHistory: [],
+      currentSpeakText: "",
+      currentStage: "",
+      elderResponses: [],
+      sessionId: null,  // 清空 sessionId
+    }));
+  }
+
+  // ─── 独立 Voice Call 系统已删除（2025-01）─────────────────────────────
+  // 原因：startAgentCall/sendAgentTurn/finalizeAgentCall 走的是 call-orchestrator，
+  // 与 elder-call-conversation 是两套互不相通的系统，导致「奶奶/妈妈」称呼错乱。
+  // 统一保留 elder-call-conversation（openCall + callSession）作为唯一通话入口。
 
   async function triggerSchedulerTick() {
     setSchedulerResult("正在触发调度器...");
@@ -1673,9 +2364,9 @@ export default function HomePage() {
     }
   }
 
-  function handleElderSubmit(text = elderInput) {
+  async function handleElderSubmit(text = elderInput) {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!trimmed || isElderReplying) return;
 
     appendElderMessage({
       id: uid("msg"),
@@ -1685,6 +2376,7 @@ export default function HomePage() {
     });
     setElderInput("");
 
+    // Task status detection (retained for task management, independent of reply)
     if (latestElderTask) {
       if (trimmed.includes("做完") || trimmed.includes("好了") || trimmed.includes("挺好的")) {
         applyTaskStatus(latestElderTask, "completed", trimmed);
@@ -1695,15 +2387,62 @@ export default function HomePage() {
       }
     }
 
-    appendElderMessage({
-      id: uid("msg"),
-      role: "assistant",
-      kind: "text",
-      content:
-        trimmed.includes("挺好") || trimmed.includes("做完") || trimmed.includes("知道")
-          ? "我收到啦，你这边的情况我会好好告诉孩子，让 TA 放心一点。"
-          : "我收到啦，我会把这句话带给孩子。你要是还想说点别的，也可以继续告诉我。",
-    });
+    // 构建 LLM 上下文
+    const elderCtx = currentElder
+      ? {
+          displayName: currentElder.displayName,
+          relation: currentElder.relation,
+          healthFocus: currentElder.healthFocus ?? [],
+          communicationPreference: currentElder.communicationPreference ?? [],
+          responseHabit: currentElder.responseHabit ?? "",
+        }
+      : undefined;
+
+    // 取最近对话历史（最多 8 轮）
+    const history = elderMessages.slice(-8).map((m) => ({
+      role: (m.role === "user" ? "user" : "assistant") as "user" | "assistant",
+      content: m.content,
+    }));
+
+    setIsElderReplying(true);
+
+    try {
+      const res = await fetch("/api/elder-chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: trimmed,
+          elder: elderCtx,
+          history,
+          caregiverName: "小雨",
+          elderId: currentElderId ?? undefined,    // P3-8: 共享上下文
+          caregiverId: "user_xiaoyu",              // P3-8: 共享上下文
+        }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error ?? "回复失败");
+
+      const reply = data.reply?.trim() || "我收到啦，你有什么想跟孩子说的，我可以帮你带到。";
+
+      appendElderMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "text",
+        content: reply,
+      });
+    } catch {
+      // 降级：LLM 失败时用简洁的 fallback
+      appendElderMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "text",
+        content: "我收到啦，你要是还有什么想说的，随时告诉我。",
+      });
+    } finally {
+      setIsElderReplying(false);
+    }
   }
 
   function runLocalAgentFlow(trimmed: string) {
@@ -1718,7 +2457,7 @@ export default function HomePage() {
         id: uid("msg"),
         role: "assistant",
         kind: "text",
-        content: `没问题，我已经把“添加长辈”表单打开了。你补一下 ${hintedRelation} 的联系方式，我就能开始帮你记挂。`,
+        content: `没问题呀~我已经把"添加长辈"的表单打开啦。你补一下${hintedRelation}的联系方式，我就能开始帮你记挂TA啦~`,
       });
       return;
     }
@@ -1730,7 +2469,7 @@ export default function HomePage() {
           id: uid("msg"),
           role: "assistant",
           kind: "text",
-          content: "这句话我可以帮你改得更柔和一些。你想发给哪位长辈？",
+          content: "这句话我可以帮你改得更柔和呀~你想发给哪位长辈呢？",
         });
         return;
       }
@@ -1739,7 +2478,7 @@ export default function HomePage() {
         id: uid("msg"),
         role: "assistant",
         kind: "note",
-        content: "这句话有点着急，我帮你换成更温和的说法。",
+        content: "这句话有点着急了呢，我帮你换个更温柔的说法吧~",
         noteVersions,
       });
       return;
@@ -1765,7 +2504,7 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: "我目前最擅长 3 件事：创建提醒、查回执、把话改得更温柔。你可以直接对我说一句完整的话试试。",
+      content: "我现在最擅长 3 件事呢：创建提醒、查回执、把话改得更温柔~你直接对我说一句完整的话试试嘛~",
     });
   }
 
@@ -1782,7 +2521,7 @@ export default function HomePage() {
         id: uid("msg"),
         role: "assistant",
         kind: "text",
-        content: "你想提醒哪位长辈？跟我说一下称呼就行。",
+        content: "你想提醒哪位长辈呀？跟我说一下称呼就好啦~",
       });
       return;
     }
@@ -1807,7 +2546,7 @@ export default function HomePage() {
         id: uid("msg"),
         role: "assistant",
         kind: "text",
-        content: `好，我先帮你整理一下。这是一个${repeatRule === "daily" ? "每日" : ""}电话提醒。${slotHint}`,
+        content: `好呀，我先帮你整理一下~这是一个${repeatRule === "daily" ? "每日" : ""}电话提醒。${slotHint}`,
       });
       return;
     }
@@ -1827,7 +2566,7 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `好的，${remindLabel}给${targets[0].displayName}打电话。要不要顺便帮你带句话？比如告诉TA你最近有点忙，但一直惦记着。`,
+      content: `好呀~${remindLabel}给${targets[0].displayName}打电话。要不要顺便帮你带句话呢？比如告诉TA你最近有点忙，但一直惦记着TA哦~`,
     });
   }
 
@@ -1862,7 +2601,7 @@ export default function HomePage() {
         id: uid("msg"),
         role: "assistant",
         kind: "text",
-        content: "没太听明白时间，你直接说个大概就行，比如：晚饭后 8 点、早上 9 点。",
+        content: "没太听明白时间呢~你直接说个大概就行呀，比如：晚饭后8点、早上9点~",
       });
       return;
     }
@@ -1878,7 +2617,7 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `好的，${parsedTime}给${flow.targets[0].displayName}打电话。要不要顺便帮你带句话？比如告诉TA你最近有点忙，但一直惦记着。`,
+      content: `好呀~${parsedTime}给${flow.targets[0].displayName}打电话。要不要顺便帮你带句话呢？比如告诉TA你最近有点忙，但一直惦记着TA哦~`,
     });
   }
 
@@ -1936,7 +2675,7 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "taskDraft",
-      content: "我帮你整理好了，确认一下就可以。",
+      content: "帮你整理好啦~确认一下就可以咯~",
       drafts,
     });
   }
@@ -2100,29 +2839,117 @@ export default function HomePage() {
     return (
       <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-4 py-8 sm:px-5 sm:py-10">
         <div className="rounded-[28px] border border-orange-100 bg-white p-6 shadow-[0_20px_60px_rgba(242,153,110,0.15)]">
-          <div className="mb-6">
-            <p className="text-sm font-medium text-orange-500">突然有点惦记你们</p>
-            <h1 className="mt-2 text-2xl font-semibold text-stone-800">先选择你的身份</h1>
-            <p className="mt-2 text-sm leading-6 text-stone-500">
-              子女端负责发起惦记和查看回执；长辈端只保留家里小助理聊天、电话提醒和反馈。
-            </p>
-          </div>
-          <div className="space-y-3">
-            <button
-              type="button"
-              onClick={() => setUserMode("child")}
-              className="min-h-12 w-full rounded-2xl bg-[#F2996E] px-4 py-3 text-sm font-medium text-white"
-            >
-              我是子女
-            </button>
-            <button
-              type="button"
-              onClick={() => setUserMode("elder")}
-              className="min-h-12 w-full rounded-2xl bg-[#FFF1C7] px-4 py-3 text-sm font-medium text-stone-700"
-            >
-              我是长辈
-            </button>
-          </div>
+          {/* 第一阶段：选角色 */}
+          {loginStep === "role" && (
+            <>
+              <div className="mb-6">
+                <p className="text-sm font-medium text-orange-500">突然有点惦记你们</p>
+                <h1 className="mt-2 text-2xl font-semibold text-stone-800">先选择你的身份</h1>
+                <p className="mt-2 text-sm leading-6 text-stone-500">
+                  选完会记住你的身份，下次进来不用重选。子女端发起惦记与查看回执；长辈端保留念念聊天、电话提醒与反馈。
+                </p>
+              </div>
+              <div className="space-y-3">
+                <button
+                  type="button"
+                  onClick={() => setLoginStep("child")}
+                  className="min-h-14 w-full rounded-2xl bg-[#F2996E] px-4 py-3 text-base font-medium text-white"
+                >
+                  我是子女
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLoginStep("elder")}
+                  className="min-h-14 w-full rounded-2xl bg-[#FFF1C7] px-4 py-3 text-base font-medium text-stone-700"
+                >
+                  我是长辈
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* 第二阶段：子女选具体人 */}
+          {loginStep === "child" && (
+            <>
+              <div className="mb-4">
+                <button
+                  type="button"
+                  onClick={() => setLoginStep("role")}
+                  className="text-xs text-stone-400"
+                >
+                  ← 返回
+                </button>
+                <h1 className="mt-2 text-xl font-semibold text-stone-800">选择你是哪位子女</h1>
+                <p className="mt-1 text-xs text-stone-400">选中后念念会以这个身份跟长辈对话。</p>
+              </div>
+              <div className="space-y-2">
+                {CAREGIVERS.map((c) => (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => selectIdentity("child", c.id)}
+                    className="flex w-full items-center gap-3 rounded-2xl border border-stone-100 bg-white px-4 py-3 text-left transition-colors hover:bg-orange-50"
+                  >
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#F2996E] text-sm font-medium text-white">
+                      {c.displayName.slice(0, 1)}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-stone-700">{c.displayName}</p>
+                      <p className="text-xs text-stone-400">{c.relation}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          {/* 第二阶段：长辈选具体人 */}
+          {loginStep === "elder" && (
+            <>
+              <div className="mb-4">
+                <button
+                  type="button"
+                  onClick={() => setLoginStep("role")}
+                  className="text-xs text-stone-400"
+                >
+                  ← 返回
+                </button>
+                <h1 className="mt-2 text-xl font-semibold text-stone-800">选择你是哪位长辈</h1>
+                <p className="mt-1 text-xs text-stone-400">选中后念念会以这个身份称呼你。</p>
+              </div>
+              {elders.length > 0 ? (
+                <div className="space-y-2">
+                  {elders.map((e) => (
+                    <button
+                      key={e.id}
+                      type="button"
+                      onClick={() => selectIdentity("elder", e.id)}
+                      className="flex w-full items-center gap-3 rounded-2xl border border-stone-100 bg-white px-4 py-3 text-left transition-colors hover:bg-amber-50"
+                    >
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#FFF1C7] text-sm font-medium text-stone-700">
+                        {e.displayName.slice(0, 1)}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-stone-700">{e.displayName}</p>
+                        <p className="text-xs text-stone-400">{e.relation}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-2xl bg-stone-50 p-4 text-sm text-stone-500">
+                  <p>还没有绑定长辈档案。</p>
+                  <button
+                    type="button"
+                    onClick={() => selectIdentity("child", "user_xiaoyu")}
+                    className="mt-3 min-h-10 rounded-full bg-[#F2996E] px-4 py-2 text-xs text-white"
+                  >
+                    先作为子女进入添加长辈
+                  </button>
+                </div>
+              )}
+            </>
+          )}
         </div>
       </main>
     );
@@ -2132,7 +2959,7 @@ export default function HomePage() {
     return (
       <main className="mx-auto flex min-h-screen max-w-md flex-col justify-center px-4 py-8 sm:px-5 sm:py-10">
         <div className="rounded-[28px] border border-orange-100 bg-white p-6 shadow-[0_20px_60px_rgba(242,153,110,0.15)]">
-          <p className="text-sm font-medium text-orange-500">家里小助理</p>
+          <p className="text-sm font-medium text-orange-500">小助理</p>
           <h1 className="mt-2 text-2xl font-semibold text-stone-800">还没有绑定长辈档案</h1>
           <p className="mt-2 text-sm leading-6 text-stone-500">
             先让子女端添加一位长辈，或者直接导入演示数据，我就能开始通过电话提醒、消息提醒和聊天反馈陪着跟进。
@@ -2147,10 +2974,10 @@ export default function HomePage() {
             </button>
             <button
               type="button"
-              onClick={() => setUserMode("child")}
+              onClick={clearIdentity}
               className="min-h-12 w-full rounded-2xl bg-[#FFF1C7] px-4 py-3 text-sm font-medium text-stone-700"
             >
-              切换到子女端
+              重选身份
             </button>
           </div>
         </div>
@@ -2235,174 +3062,479 @@ export default function HomePage() {
     );
   }
 
-  const navActiveTab: "home" | "tasks" | "profile" | "notifications" =
-    activeTab === "assistant" ? "home" : activeTab;
+  const navActiveTab: "home" | "tasks" | "assistant" | "notifications" =
+    activeTab === "profile" ? "home" : activeTab;
 
   if (userMode === "elder") {
     return (
-      <main className="mx-auto min-h-screen max-w-md px-0 text-stone-800">
+      <main className="mx-auto flex h-[100svh] max-w-md flex-col overflow-hidden text-stone-800">
         {callSession.open && (
-          <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-stone-950 p-6 text-white">
-            <p className="text-center text-xs text-stone-400">来电中</p>
-            <p className="mt-1 text-center text-lg font-semibold text-stone-200">小助理</p>
-            <p className="mt-1 text-center text-sm text-stone-400">
-              {callSession.phase === "dialing" && "正在问候..."}
-              {callSession.phase === "connected" && "通话中"}
-              {callSession.phase === "missed" && "未接通"}
-              {callSession.phase === "ended" && "通话结束"}
-            </p>
+          <div className="fixed inset-0 z-50 flex flex-col bg-gradient-to-b from-[#2a1a0f] via-[#1a1010] to-[#0d0808] text-white">
+            {/* Ambient orbs */}
+            <div className="pointer-events-none absolute left-[-10%] top-[15%] h-72 w-72 rounded-full bg-[#F2996E]/15 blur-[100px]" />
+            <div className="pointer-events-none absolute bottom-[25%] right-[-5%] h-64 w-64 rounded-full bg-rose-500/10 blur-[90px]" />
 
-            <div className="mt-8 flex h-28 w-28 items-center justify-center rounded-full bg-gradient-to-br from-orange-400 to-orange-600 text-4xl font-bold shadow-[0_0_40px_rgba(249,115,22,0.4)]">
-              助
-            </div>
-
-            <div className="mt-6 flex items-end justify-center gap-1.5">
-              {[20, 36, 16, 40, 24, 32, 14, 28].map((height, index) => (
-                <span
-                  key={index}
-                  className="w-1.5 rounded-full bg-orange-400/70 transition-all"
-                  style={{
-                    height: callSession.phase === "connected" || callSession.phase === "dialing" ? height : 8,
-                    animation: callSession.phase === "connected" || callSession.phase === "dialing" ? `pulse ${0.5 + index * 0.08}s ease-in-out infinite alternate` : "none",
-                  }}
-                />
-              ))}
-            </div>
-
-            <div className="mt-6 w-full max-w-xs rounded-[24px] bg-white/5 p-4 text-sm leading-7 text-stone-200">
-              {callSession.phase === "dialing" && "正在接通，请稍等..."}
-              {(callSession.phase === "connected" || callSession.phase === "ended") && (
-                buildCallScript(currentCallTask, currentElder, currentCallTask?.relayMessage)
+            {/* Header */}
+            <div className="relative z-10 flex items-center justify-between px-6 pt-[max(20px,env(safe-area-inset-top))]">
+              <p className="text-[12px] text-white/40">
+                {callSession.phase === "dialing" && "来电中"}
+                {(callSession.phase === "connected" || callSession.phase === "speaking" || callSession.phase === "loading") && "通话中"}
+                {callSession.phase === "listening" && "通话中"}
+                {callSession.phase === "missed" && "未接通"}
+                {callSession.phase === "ended" && "通话结束"}
+              </p>
+              {callSession.callHistory.length > 0 && callSession.phase !== "dialing" && callSession.phase !== "ended" && callSession.phase !== "missed" && (
+                <p className="text-[11px] text-white/30">
+                  第{Math.ceil(callSession.callHistory.length / 2) + 1}轮
+                </p>
               )}
-              {callSession.phase === "missed" && "暂时没人接听，稍后再试。"}
             </div>
 
-            {callSession.phase === "dialing" && (
-              <div className="mt-6 flex gap-4">
-                <button
-                  type="button"
-                  onClick={() => updateCallPhase("connected")}
-                  className="min-h-14 min-w-28 rounded-full bg-emerald-500 px-6 text-base font-medium shadow-lg"
-                >
-                  接听
-                </button>
-                <button
-                  type="button"
-                  onClick={() => updateCallPhase("missed")}
-                  className="min-h-14 min-w-28 rounded-full bg-rose-600 px-6 text-base font-medium shadow-lg"
-                >
-                  拒接
-                </button>
+            {/* Center area */}
+            <div className="relative z-10 flex flex-1 flex-col items-center justify-center px-6">
+              {/* Avatar with breathing rings */}
+              <div className="relative flex items-center justify-center">
+                {(callSession.phase === "dialing" || callSession.phase === "speaking" || callSession.phase === "connected" || callSession.phase === "loading") && (
+                  <>
+                    <span className="absolute h-32 w-32 rounded-full bg-[#F2996E]/20" style={{ animation: "breathe 2s ease-out infinite" }} />
+                    <span className="absolute h-28 w-28 rounded-full bg-[#F2996E]/15" style={{ animation: "breathe 2s ease-out 0.3s infinite" }} />
+                  </>
+                )}
+                {callSession.phase === "listening" && (
+                  <>
+                    <span className="absolute h-32 w-32 rounded-full bg-emerald-400/15" style={{ animation: "breathe 2.5s ease-out infinite" }} />
+                    <span className="absolute h-28 w-28 rounded-full bg-emerald-400/10" style={{ animation: "breathe 2.5s ease-out 0.3s infinite" }} />
+                  </>
+                )}
+                <img src="/assistant-avatar.jpg" alt="小助理" className="relative h-24 w-24 rounded-full object-cover shadow-[0_8px_32px_rgba(242,153,110,0.3)]" />
               </div>
-            )}
 
-            {(callSession.phase === "connected" || callSession.phase === "ended") && (
-              <div className="mt-6 flex gap-4">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (currentCallTask) applyTaskStatus(currentCallTask, "confirmed", "我知道了");
-                    closeCall();
-                  }}
-                  className="min-h-12 rounded-full bg-white/10 px-6 text-sm font-medium"
-                >
-                  我知道了
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (currentCallTask) applyTaskStatus(currentCallTask, "completed", "好的，我说完了");
-                    closeCall();
-                  }}
-                  className="min-h-12 rounded-full bg-white/10 px-6 text-sm font-medium"
-                >
-                  我说完了
-                </button>
-                <button
-                  type="button"
-                  onClick={closeCall}
-                  className="min-h-12 rounded-full bg-rose-600 px-6 text-sm font-medium"
-                >
-                  挂断
-                </button>
-              </div>
-            )}
+              <p className="mt-5 text-[22px] font-semibold tracking-tight">小助理：念念</p>
+              <p className="mt-1.5 text-[13px] text-white/50">
+                {callSession.phase === "dialing" && "正在问候..."}
+                {callSession.phase === "speaking" && "念念说话中..."}
+                {callSession.phase === "loading" && "念念思考中..."}
+                {callSession.phase === "connected" && "通话中"}
+                {callSession.phase === "listening" && "轮到您说啦~"}
+                {callSession.phase === "missed" && "暂时没人接"}
+                {callSession.phase === "ended" && "通话结束"}
+              </p>
 
-            {callSession.phase === "missed" && (
-              <button
-                type="button"
-                onClick={closeCall}
-                className="mt-6 min-h-12 rounded-full bg-white/10 px-8 text-sm font-medium"
-              >
-                关闭
-              </button>
-            )}
+              {/* Waveform - AI speaking */}
+              {(callSession.phase === "speaking" || callSession.phase === "dialing") && (
+                <div className="mt-5 flex h-8 items-center justify-center gap-1">
+                  {[0.4, 0.7, 0.3, 0.9, 0.5, 0.8, 0.35, 0.6].map((ratio, i) => (
+                    <span
+                      key={i}
+                      className="w-1 rounded-full bg-[#F2996E]/70"
+                      style={{
+                        height: `${ratio * 32}px`,
+                        animation: `waveform ${0.5 + i * 0.08}s ease-in-out infinite alternate`,
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Listening indicator - green waveform */}
+              {callSession.phase === "listening" && (
+                <div className="mt-5 flex h-8 items-center justify-center gap-1">
+                  {[0.3, 0.6, 0.4, 0.7, 0.5, 0.6, 0.4, 0.5].map((ratio, i) => (
+                    <span
+                      key={i}
+                      className="w-1 rounded-full bg-emerald-400/50"
+                      style={{
+                        height: `${ratio * 28}px`,
+                        animation: elderTTS.speaking ? "none" : `waveform 0.6s ease-in-out ${i * 0.08}s infinite alternate`,
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Current turn subtitle - glassmorphism card */}
+              {(callSession.phase === "speaking" || callSession.phase === "loading") && callSession.currentSpeakText && (
+                <div className="mt-5 w-full max-w-xs">
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-3 backdrop-blur-md">
+                    <p className="text-[14px] leading-6 text-white/90">
+                      {callSession.currentSpeakText}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Listening subtitle + text input */}
+              {callSession.phase === "listening" && (
+                <div className="mt-5 w-full max-w-xs">
+                  <div className="rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-3 backdrop-blur-md">
+                    <p className="mb-3 text-center text-[13px] text-white/50">
+                      轮到您说啦~
+                    </p>
+                    {/* Free text input */}
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={callInput}
+                        onChange={(e) => setCallInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && callInput.trim()) {
+                            const text = callInput.trim();
+                            setCallInput("");
+                            handleElderResponse(text);
+                          }
+                        }}
+                        placeholder="输入您想说的话..."
+                        autoFocus
+                        className="min-h-11 flex-1 rounded-xl border border-white/15 bg-white/[0.08] px-3 py-2 text-[14px] text-white/90 placeholder:text-white/30 outline-none backdrop-blur-md focus:border-white/30"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (callInput.trim()) {
+                            const text = callInput.trim();
+                            setCallInput("");
+                            handleElderResponse(text);
+                          }
+                        }}
+                        disabled={!callInput.trim()}
+                        className="flex min-h-11 items-center justify-center rounded-xl bg-[#F2996E] px-4 text-[14px] font-medium text-white disabled:opacity-30"
+                      >
+                        发送
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Ended state - show conversation summary */}
+              {callSession.phase === "ended" && (
+                <div className="mt-5 w-full max-w-xs rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-3 backdrop-blur-md">
+                  <p className="mb-2 text-center text-[12px] text-[#F2996E]/60">通话结束啦</p>
+                  {(callSession.elderResponses ?? []).length > 0 && (
+                    <div className="space-y-1.5">
+                      <p className="text-[11px] text-white/40">您说的：</p>
+                      {callSession.elderResponses?.map((r, i) => (
+                        <p key={i} className="text-[13px] text-emerald-300/80">· {r}</p>
+                      ))}
+                    </div>
+                  )}
+                  <p className="mt-2 text-[12px] text-white/40">念念会把情况告诉小雨的~</p>
+                </div>
+              )}
+
+              {callSession.phase === "missed" && (
+                <div className="mt-5 w-full max-w-xs rounded-2xl border border-white/10 bg-white/[0.06] px-4 py-3 text-center backdrop-blur-md">
+                  <p className="text-[14px] text-white/50">暂时没人接听，稍后再试</p>
+                </div>
+              )}
+            </div>
+
+            {/* Bottom actions */}
+            <div className="relative z-10 px-8 pb-[max(28px,env(safe-area-inset-bottom))] pt-4">
+              {/* Dialing - accept / decline */}
+              {callSession.phase === "dialing" && (
+                <div className="flex items-center justify-center gap-16">
+                  <button
+                    type="button"
+                    onClick={() => updateCallPhase("missed")}
+                    className="flex flex-col items-center gap-1.5"
+                  >
+                    <div className="flex h-14 w-14 items-center justify-center rounded-full bg-rose-500 shadow-lg shadow-rose-500/30">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" className="text-white rotate-[135deg]">
+                        <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56-.35-.12-.74-.03-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z" />
+                      </svg>
+                    </div>
+                    <span className="text-[11px] text-white/40">拒接</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateCallPhase("connected")}
+                    className="flex flex-col items-center gap-1.5"
+                  >
+                    <div className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-500 shadow-lg shadow-emerald-500/30">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" className="text-white">
+                        <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56-.35-.12-.74-.03-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z" />
+                      </svg>
+                    </div>
+                    <span className="text-[11px] text-white/40">接听</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Loading - just hang up */}
+              {callSession.phase === "loading" && (
+                <div className="flex items-center justify-center">
+                  <button
+                    type="button"
+                    onClick={closeCall}
+                    className="flex flex-col items-center gap-1.5"
+                  >
+                    <div className="flex h-14 w-14 items-center justify-center rounded-full bg-rose-500 shadow-lg shadow-rose-500/30">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" className="text-white rotate-[135deg]">
+                        <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56-.35-.12-.74-.03-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z" />
+                      </svg>
+                    </div>
+                    <span className="text-[10px] text-white/40">挂断</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Speaking - replay button + hang up */}
+              {callSession.phase === "speaking" && (
+                <div className="flex items-center justify-center gap-8">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const text = callSession.currentSpeakText ?? "";
+                      if (text) {
+                        elderTTS.stop();
+                        const ending = callSession.currentStage === "closing";
+                        setTimeout(() => playElderTurn(text, ending), 200);
+                      }
+                    }}
+                    className="flex flex-col items-center gap-1.5"
+                  >
+                    <div className="flex h-12 w-12 items-center justify-center rounded-full border border-white/15 bg-white/[0.08] backdrop-blur-md">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-white/70">
+                        <path d="M3 12a9 9 0 1 0 9-9c-2.52 0-4.93 1.06-6.7 2.82L3 8" />
+                        <path d="M3 4v4h4" />
+                      </svg>
+                    </div>
+                    <span className="text-[10px] text-white/40">重播</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeCall}
+                    className="flex flex-col items-center gap-1.5"
+                  >
+                    <div className="flex h-14 w-14 items-center justify-center rounded-full bg-rose-500 shadow-lg shadow-rose-500/30">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" className="text-white rotate-[135deg]">
+                        <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56-.35-.12-.74-.03-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z" />
+                      </svg>
+                    </div>
+                    <span className="text-[10px] text-white/40">挂断</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Listening - response action buttons */}
+              {callSession.phase === "listening" && (
+                <div className="flex items-center justify-center gap-6">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const text = callSession.currentSpeakText ?? "";
+                      if (text) {
+                        elderTTS.stop();
+                        const ending = callSession.currentStage === "closing";
+                        setTimeout(() => playElderTurn(text, ending), 200);
+                      }
+                    }}
+                    className="flex flex-col items-center gap-1.5"
+                  >
+                    <div className="flex h-12 w-12 items-center justify-center rounded-full border border-white/15 bg-white/[0.08] backdrop-blur-md">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-white/70">
+                        <path d="M3 12a9 9 0 1 0 9-9c-2.52 0-4.93 1.06-6.7 2.82L3 8" />
+                        <path d="M3 4v4h4" />
+                      </svg>
+                    </div>
+                    <span className="text-[10px] text-white/40">重播</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleElderResponse("好的，知道了")}
+                    className="flex flex-col items-center gap-1.5"
+                  >
+                    <div className="flex h-12 w-12 items-center justify-center rounded-full border border-white/15 bg-white/[0.08] backdrop-blur-md">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-white/70">
+                        <path d="M9 12l2 2 4-4" />
+                        <circle cx="12" cy="12" r="9" />
+                      </svg>
+                    </div>
+                    <span className="text-[10px] text-white/40">知道了</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={skipToNextTurn}
+                    className="flex flex-col items-center gap-1.5"
+                  >
+                    <div className="flex h-12 w-12 items-center justify-center rounded-full border border-white/15 bg-white/[0.08] backdrop-blur-md">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" className="text-white/70">
+                        <path d="M5 12h14M12 5l7 7-7 7" />
+                      </svg>
+                    </div>
+                    <span className="text-[10px] text-white/40">跳过</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={closeCall}
+                    className="flex flex-col items-center gap-1.5"
+                  >
+                    <div className="flex h-14 w-14 items-center justify-center rounded-full bg-rose-500 shadow-lg shadow-rose-500/30">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" className="text-white rotate-[135deg]">
+                        <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56-.35-.12-.74-.03-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z" />
+                      </svg>
+                    </div>
+                    <span className="text-[10px] text-white/40">挂断</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Ended - close button */}
+              {callSession.phase === "ended" && (
+                <div className="flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (currentCallTask) applyTaskStatus(currentCallTask, "confirmed", "通话完成");
+                      closeCall();
+                    }}
+                    className="flex flex-col items-center gap-1.5"
+                  >
+                    <div className="flex h-14 w-14 items-center justify-center rounded-full border border-white/15 bg-white/[0.08] backdrop-blur-md">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-white/70">
+                        <path d="M18 6 6 18M6 6l12 12" />
+                      </svg>
+                    </div>
+                    <span className="text-[11px] text-white/40">关闭</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Missed - close */}
+              {callSession.phase === "missed" && (
+                <div className="flex justify-center">
+                  <button
+                    type="button"
+                    onClick={closeCall}
+                    className="flex flex-col items-center gap-1.5"
+                  >
+                    <div className="flex h-12 w-12 items-center justify-center rounded-full border border-white/15 bg-white/[0.08] backdrop-blur-md">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-white/60">
+                        <path d="M18 6 6 18M6 6l12 12" />
+                      </svg>
+                    </div>
+                    <span className="text-[11px] text-white/40">关闭</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <style jsx>{`
+              @keyframes breathe {
+                0% { transform: scale(1); opacity: 0.5; }
+                100% { transform: scale(1.5); opacity: 0; }
+              }
+              @keyframes pulse {
+                0% { transform: scaleY(0.3); }
+                100% { transform: scaleY(1); }
+              }
+              @keyframes waveform {
+                0% { transform: scaleY(0.3); }
+                100% { transform: scaleY(1); }
+              }
+            `}</style>
           </div>
         )}
 
-        <VoiceCallModal
-          open={voiceCallOpen}
-          elderName={currentElder?.displayName ?? "长辈"}
-          callSessionId={voiceCallSessionId}
-          initialText={voiceCallInitialText}
-          onClose={() => {
-            setVoiceCallOpen(false);
-            setVoiceCallSessionId(null);
-            setVoiceCallInitialText("");
-          }}
-        />
-
-        <section className="flex min-h-screen flex-col bg-[#FFF8F3]">
-          <div className="border-b border-orange-100 bg-[linear-gradient(180deg,#FFF7EE_0%,#FFFDF9_100%)] px-4 pb-3 pt-[max(16px,env(safe-area-inset-top))]">
-            <div className="flex items-center justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-[17px] font-semibold text-stone-800">家里小助理</p>
-                <p className="mt-1 text-[15px] text-stone-700">{currentElder?.displayName ?? "妈妈"}，你好呀</p>
-                <p className="mt-1 text-[13px] text-orange-500/80">有事我会直接告诉你。</p>
+        <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {/* Clean header - WeChat style */}
+          <div className="flex items-center justify-between px-4 py-2.5">
+            <div className="flex items-center gap-2.5">
+              <img src="/assistant-avatar.jpg" alt="小助理" className="h-8 w-8 rounded-full object-cover" />
+              <div>
+                <p className="text-[15px] font-semibold leading-tight text-stone-800">小助理：念念</p>
+                <p className="mt-0.5 text-[11px] leading-tight text-stone-400">
+                  {currentElder ? `${currentElder.displayName}，你好` : ""} · 小助理在线
+                </p>
               </div>
-              <button
-                type="button"
-                onClick={() => setUserMode("child")}
-                className="min-h-12 rounded-full bg-orange-50 px-4 py-2 text-xs text-stone-600"
-              >
-                子女端
-              </button>
             </div>
+            <button
+              type="button"
+              onClick={() => setIdentityCardOpen(true)}
+              className="flex h-9 w-9 items-center justify-center rounded-full bg-[#FFF1C7] text-sm font-medium text-stone-700 shadow-sm transition-transform hover:scale-105"
+              aria-label="我的身份"
+              title={currentElder?.displayName ?? "我的身份"}
+            >
+              {(currentElder?.displayName ?? "长").slice(0, 1)}
+            </button>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-3 py-4">
+          {/* Message list - WeChat style bubbles */}
+          <div ref={elderChatScrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
             <div className="space-y-3">
-              {elderMessages.map((message) => (
-                <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
-                  <div
-                    className={`max-w-[82%] rounded-[20px] px-4 py-3 text-[15px] leading-7 shadow-sm ${
-                      message.role === "user"
-                        ? "bg-[#F2996E] text-white shadow-[0_10px_24px_rgba(242,153,110,0.22)]"
-                        : "border border-orange-100 bg-[#FFFDFB] text-stone-700"
-                    }`}
-                  >
-                    {message.content}
+              {elderMessages.map((message, idx) => {
+                const isLastAssistant = message.role === "assistant" && !isElderReplying && !elderMessages.slice(idx + 1).some(m => m.role === "assistant");
+                return (
+                  <div key={message.id}>
+                    <div className={`flex items-start gap-2 ${message.role === "user" ? "justify-end" : ""}`} {...(message.role === "assistant" ? { "data-assistant-message": "true" } : {})}>
+                      {message.role === "assistant" && (
+                        <img src="/assistant-avatar.jpg" alt="小助理" className="mt-0.5 h-9 w-9 shrink-0 rounded-full object-cover" />
+                      )}
+                      <div className={`max-w-[80%] rounded-2xl px-3.5 py-2.5 text-[14px] leading-6 ${
+                        message.role === "user"
+                          ? "rounded-tr-md bg-[#F2996E] text-white"
+                          : "rounded-tl-md bg-white text-stone-700"
+                      }`}>
+                        <p>{message.content}</p>
+                      </div>
+                    </div>
+                    {isLastAssistant && (
+                      <div className="ml-11 mt-2 flex flex-wrap gap-1.5">
+                        {ELDER_QUICK_INPUTS.map((sample) => (
+                          <button
+                            key={sample}
+                            type="button"
+                            onClick={() => setElderInput(sample)}
+                            className="rounded-full bg-orange-50 px-2.5 py-1 text-[11px] text-orange-600/80 transition-colors active:bg-orange-100"
+                          >
+                            {sample}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
+                );
+              })}
+              {/* Loading indicator while LLM generates reply */}
+              {isElderReplying && (
+                <div className="flex items-start gap-2">
+                  <img src="/assistant-avatar.jpg" alt="小助理" className="mt-0.5 h-9 w-9 shrink-0 rounded-full object-cover" />
+                  <div className="flex items-center gap-1 rounded-2xl rounded-tl-md bg-white px-4 py-3">
+                    {[0, 1, 2].map((i) => (
+                      <span key={i} className="h-2 w-2 rounded-full bg-stone-300" style={{ animation: `elderTypingPulse 1.2s ease-in-out ${i * 0.2}s infinite` }} />
+                    ))}
+                  </div>
+                  <style>{`@keyframes elderTypingPulse { 0%,100%{opacity:.3;transform:scale(.8)} 50%{opacity:1;transform:scale(1.2)} }`}</style>
                 </div>
-              ))}
+              )}
             </div>
           </div>
 
-          <div className="border-t border-orange-100 bg-[linear-gradient(180deg,#FFFDF9_0%,#FFF5EA_100%)] px-3 pb-[calc(12px+env(safe-area-inset-bottom))] pt-3">
-            <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
+          {/* Bottom input area - WeChat style */}
+          <div className="shrink-0 bg-white/60 px-4 pb-[calc(4px+env(safe-area-inset-bottom))] pt-2">
+            {/* Quick actions - subtle inline chips */}
+            {/* 入口收拢：T0 修复后只保留“电话提醒”一个通话入口，避免“奶奶/妈妈”混乱 */}
+            <div className="mb-2 flex flex-wrap gap-2 pb-1">
               <button
                 type="button"
-                onClick={() => openCall(latestElderTask, "elder")}
-                className="min-h-10 shrink-0 rounded-full border border-orange-100 bg-[#FFF1C7] px-4 text-sm text-stone-700"
+                onClick={() => {
+                  if (!currentElderId) {
+                    appendElderMessage({
+                      id: uid("msg"),
+                      role: "assistant",
+                      kind: "text",
+                      content: "还没绑定长辈身份呀，先在右上角选一下吧~",
+                    });
+                    return;
+                  }
+                  // 用 currentElderTask（锁定到当前 elder），不要用 latestElderTask
+                  // 避免多个 elder 任务交叉时被别的 elder 名字污染
+                  openCall(latestElderTask, "elder");
+                }}
+                className="shrink-0 rounded-full bg-orange-50 px-3 py-1.5 text-[12px] text-orange-700/80"
               >
                 电话提醒
-              </button>
-              <button
-                type="button"
-                onClick={startAgentCall}
-                className="min-h-10 shrink-0 rounded-full bg-[#F2996E] px-4 text-sm font-medium text-white"
-              >
-                模拟语音电话
               </button>
               <button
                 type="button"
@@ -2416,7 +3548,7 @@ export default function HomePage() {
                     });
                   }
                 }}
-                className="min-h-10 shrink-0 rounded-full border border-orange-100 bg-white px-4 text-sm text-stone-700"
+                className="shrink-0 rounded-full bg-orange-50 px-3 py-1.5 text-[12px] text-orange-700/80"
               >
                 看提醒
               </button>
@@ -2430,36 +3562,34 @@ export default function HomePage() {
                     content: buildAssistantPreview(assistantProfile, currentElder?.displayName ?? "您"),
                   })
                 }
-                className="min-h-10 shrink-0 rounded-full border border-orange-100 bg-white px-4 text-sm text-stone-700"
+                className="shrink-0 rounded-full bg-orange-50 px-3 py-1.5 text-[12px] text-orange-700/80"
               >
                 看小纸条
               </button>
             </div>
 
-            <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
-              {ELDER_QUICK_INPUTS.map((sample) => (
-                <button
-                  key={sample}
-                  type="button"
-                  onClick={() => setElderInput(sample)}
-                  className="min-h-10 shrink-0 rounded-full bg-orange-50 px-4 text-sm text-stone-600"
-                >
-                  {sample}
-                </button>
-              ))}
-            </div>
 
-            <div className="flex items-end gap-2">
+            {/* Input row */}
+            <div className="flex items-center gap-2 pb-2">
               <textarea
                 value={elderInput}
                 onChange={(event) => setElderInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    handleElderSubmit();
+                  }
+                }}
                 placeholder="直接回复我..."
-                className="min-h-12 flex-1 resize-none rounded-[24px] border border-orange-100 bg-[#FFFDFB] px-4 py-3 text-[15px] text-stone-700 outline-none"
+                rows={1}
+                className="min-h-10 flex-1 resize-none rounded-2xl bg-white px-3.5 py-2.5 text-[14px] text-stone-700 outline-none"
               />
               <button
                 type="button"
+                disabled={!elderInput.trim() || isElderReplying}
                 onClick={() => handleElderSubmit()}
-                className="min-h-12 shrink-0 rounded-full bg-[#F2996E] px-5 py-2 text-sm font-medium text-white"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-[13px] font-medium text-white transition-colors disabled:bg-stone-200"
+                style={{ backgroundColor: elderInput.trim() && !isElderReplying ? "#F2996E" : undefined }}
               >
                 发送
               </button>
@@ -2472,31 +3602,30 @@ export default function HomePage() {
 
   return (
     <main
-      className={`mx-auto max-w-5xl px-3 py-4 text-stone-800 sm:px-4 sm:py-6 ${
-        activeTab === "home" ? "h-[100svh] overflow-hidden" : "min-h-screen"
+      className={`mx-auto max-w-5xl text-stone-800 ${
+        activeTab === "home" ? "flex h-[100svh] flex-col overflow-hidden" : "min-h-screen px-3 py-4 sm:px-4 sm:py-6"
       }`}
     >
       {callSession.open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(78,52,39,0.18)] p-4 backdrop-blur-sm">
           <div className="w-full max-w-sm rounded-[36px] border border-orange-100 bg-[linear-gradient(180deg,#FFF9F3_0%,#FFF3E7_100%)] p-6 shadow-[0_24px_60px_rgba(145,94,61,0.2)]">
             <div className="text-center">
-              <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-[linear-gradient(180deg,#F6B58C_0%,#F2996E_100%)] text-2xl font-semibold text-white shadow-[0_14px_30px_rgba(242,153,110,0.3)]">
-                助
-              </div>
+              <img src="/assistant-avatar.jpg" alt="小助理" className="mx-auto h-20 w-20 rounded-full object-cover shadow-[0_14px_30px_rgba(242,153,110,0.3)]" />
               <p className="mt-4 text-xs font-medium tracking-[0.14em] text-orange-500">
                 {callSession.phase === "dialing" && "正在给"}
-                {callSession.phase === "connected" && "已接通"}
+                {(callSession.phase === "connected" || callSession.phase === "speaking" || callSession.phase === "listening") && "已接通"}
                 {callSession.phase === "missed" && "未接通"}
                 {callSession.phase === "ended" && "通话结束"}
               </p>
               <p className="mt-2 text-xl font-semibold text-stone-800">{currentElder?.displayName ?? "长辈"}</p>
               <p className="mt-2 text-sm leading-6 text-stone-500">
                 {callSession.phase === "dialing" && "正在拨打电话，请稍等..."}
-                {callSession.phase === "connected" && "已接听，正在通话中..."}
+                {(callSession.phase === "connected" || callSession.phase === "speaking") && "念念正在和TA聊天..."}
+                {callSession.phase === "listening" && "TA正在回应念念..."}
                 {callSession.phase === "missed" && "暂时没人接听，稍后会再试一次"}
                 {callSession.phase === "ended" && `${currentCallTask?.title ?? "问候"}已完成`}
               </p>
-              {(callSession.phase === "connected" || callSession.phase === "ended") && (
+              {(callSession.phase === "connected" || callSession.phase === "speaking" || callSession.phase === "listening" || callSession.phase === "ended") && (
                 <div className="mt-4 rounded-[20px] border border-orange-100 bg-white/80 p-3 text-xs text-stone-500">
                   通话结束后，{currentElder?.displayName ?? "长辈"}的回复会自动同步给你
                 </div>
@@ -2514,133 +3643,110 @@ export default function HomePage() {
       )}
 
       {/* ─── Agent Call Modal ──────────────────────────────────────── */}
-      {agentCall.active && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/50 p-4 backdrop-blur-sm">
-          <div className="flex h-[90vh] w-full max-w-lg flex-col rounded-[36px] border border-orange-100 bg-[linear-gradient(180deg,#FFF9F3_0%,#FFF3E7_100%)] p-4 shadow-2xl">
-            {/* Header */}
-            <div className="rounded-[28px] border border-orange-100/80 bg-white/90 p-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-xs font-medium tracking-[0.14em] text-orange-500">
-                    {agentCall.phase === "dialing" && "🤖 Agent 正在呼叫..."}
-                    {agentCall.phase === "connected" && "🟢 Agent 通话中"}
-                    {agentCall.phase === "ended" && "✅ 通话已结束"}
-                  </p>
-                  <p className="mt-1 text-lg font-semibold text-stone-800">{currentElder?.displayName ?? "长辈"}</p>
-                  {agentCall.stage && (
-                    <p className="mt-1 text-xs text-stone-500">
-                      当前阶段: <span className="rounded-full bg-orange-50 px-2 py-0.5 text-orange-600">{agentCall.stage}</span>
-                    </p>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  onClick={closeAgentCall}
-                  className="min-h-8 rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-600"
-                >
-                  关闭
-                </button>
+      {/* ─── Agent Call Modal 已删除（2025-01）────────────────────────── */}
+      {/* 合并到 elder-call-conversation（openCall + CallSession）作为唯一通话入口，避免「奶奶/妈妈」称呼错乱 */}
+
+      {/* ─── 右上角「我的身份」轻量绑定卡（2025-01新增）────────────────────── */}
+      {identityCardOpen && identity && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/40 p-4 backdrop-blur-[2px]"
+          onClick={() => setIdentityCardOpen(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-[28px] border border-orange-100 bg-white p-5 shadow-[0_18px_50px_rgba(47,41,36,0.16)]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            {/* 当前身份 */}
+            <div className="flex items-center gap-3">
+              <div
+                className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-base font-semibold shadow-sm ${
+                  identity.role === "child" ? "bg-[#F2996E] text-white" : "bg-[#FFF1C7] text-stone-700"
+                }`}
+              >
+                {(identity.role === "child"
+                  ? CAREGIVERS.find((c) => c.id === identity.personId)?.displayName ?? "我"
+                  : elders.find((e) => e.id === identity.personId)?.displayName ?? "长"
+                ).slice(0, 1)}
               </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-base font-semibold text-stone-800">
+                  {identity.role === "child"
+                    ? CAREGIVERS.find((c) => c.id === identity.personId)?.displayName ?? "未知子女"
+                    : elders.find((e) => e.id === identity.personId)?.displayName ?? "未知长辈"}
+                </p>
+                <p className="mt-0.5 text-xs text-stone-400">
+                  {identity.role === "child" ? "子女身份" : "长辈身份"}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIdentityCardOpen(false)}
+                className="min-h-8 rounded-full bg-stone-100 px-3 py-1 text-xs text-stone-500 transition-colors hover:bg-stone-200"
+              >
+                关闭
+              </button>
             </div>
 
-            {/* Transcript */}
-            <div className="mt-3 min-h-0 flex-1 overflow-y-auto rounded-[24px] border border-orange-100 bg-white/80 p-3">
-              <div className="space-y-2">
-                {agentCall.transcript.map((entry, idx) => (
-                  <div key={idx} className={`flex ${entry.role === "elder" ? "justify-end" : "justify-start"}`}>
+            {/* 我的家人 */}
+            <div className="mt-5">
+              <p className="text-xs font-medium text-stone-400">
+                {identity.role === "child" ? "📌 我惦记的长辈" : "📎 惦记我的子女"}
+              </p>
+              <div className="mt-2 space-y-2">
+                {identity.role === "child" ? (
+                  elders.length > 0 ? (
+                    elders.map((e) => (
+                      <div
+                        key={e.id}
+                        className="flex items-center gap-3 rounded-2xl border border-stone-100 bg-stone-50 px-3 py-2"
+                      >
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#FFF1C7] text-sm font-medium text-stone-700">
+                          {e.displayName.slice(0, 1)}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-stone-700">{e.displayName}</p>
+                          <p className="text-xs text-stone-400">{e.relation}</p>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="rounded-2xl bg-stone-50 px-3 py-2 text-xs text-stone-400">还没有绑定长辈。</p>
+                  )
+                ) : (
+                  CAREGIVERS.map((c) => (
                     <div
-                      className={`max-w-[85%] rounded-[18px] px-3 py-2 text-sm leading-6 ${
-                        entry.role === "elder"
-                          ? "bg-[#F2996E] text-white"
-                          : "border border-orange-100 bg-[#FFFDFB] text-stone-700"
-                      }`}
+                      key={c.id}
+                      className="flex items-center gap-3 rounded-2xl border border-stone-100 bg-stone-50 px-3 py-2"
                     >
-                      <p className="mb-1 text-[10px] opacity-60">{entry.role === "elder" ? "👵 长辈" : "🤖 小助理"}</p>
-                      {entry.text}
-                    </div>
-                  </div>
-                ))}
-                {agentCall.isProcessing && (
-                  <div className="flex justify-start">
-                    <div className="rounded-[18px] border border-orange-100 bg-[#FFFDFB] px-3 py-2 text-sm text-stone-400">
-                      Agent 思考中...
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Input area (when connected) */}
-            {agentCall.phase === "connected" && (
-              <div className="mt-3 flex items-end gap-2">
-                <textarea
-                  value={agentElderInput}
-                  onChange={(e) => setAgentElderInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendAgentTurn(); } }}
-                  placeholder="模拟老人说话... (Enter 发送)"
-                  rows={2}
-                  className="min-h-12 flex-1 resize-none rounded-[20px] border border-orange-100 bg-white px-3 py-2 text-sm text-stone-700 outline-none"
-                />
-                <button
-                  type="button"
-                  disabled={agentCall.isProcessing}
-                  onClick={sendAgentTurn}
-                  className="min-h-12 shrink-0 rounded-full bg-[#F2996E] px-4 py-2 text-sm font-medium text-white disabled:bg-orange-200"
-                >
-                  发送
-                </button>
-                <button
-                  type="button"
-                  disabled={agentCall.isProcessing}
-                  onClick={finalizeAgentCall}
-                  className="min-h-12 shrink-0 rounded-full bg-rose-500 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-                >
-                  结束
-                </button>
-              </div>
-            )}
-
-            {/* Care Insight Card (when ended) */}
-            {agentCall.phase === "ended" && agentCall.careInsight && (
-              <div className="mt-3 overflow-y-auto rounded-[24px] border border-emerald-200 bg-emerald-50 p-4">
-                <p className="mb-3 text-xs font-semibold tracking-wide text-emerald-700">💡 子女端洞察</p>
-                <div className="space-y-2 text-sm text-stone-700">
-                  <div>
-                    <p className="text-xs font-medium text-stone-500">事实摘要</p>
-                    <p>{agentCall.careInsight.factualSummary}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs font-medium text-stone-500">关系洞察</p>
-                    <p>{agentCall.careInsight.relationshipInsight}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs font-medium text-stone-500">建议行动</p>
-                    <p>{agentCall.careInsight.suggestedAction}</p>
-                  </div>
-                  {agentCall.careInsight.suggestedMessage && (
-                    <div>
-                      <p className="text-xs font-medium text-stone-500">可发送消息</p>
-                      <div className="mt-1 rounded-xl bg-white p-2 text-sm text-stone-600">
-                        {agentCall.careInsight.suggestedMessage}
+                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#F2996E] text-sm font-medium text-white">
+                        {c.displayName.slice(0, 1)}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-stone-700">{c.displayName}</p>
+                        <p className="text-xs text-stone-400">{c.relation}</p>
                       </div>
                     </div>
-                  )}
-                </div>
-                {agentCall.finalizeResult && (
-                  <p className="mt-3 text-xs text-stone-400">
-                    提取记忆: {agentCall.finalizeResult.memoriesExtracted} 条
-                  </p>
+                  ))
                 )}
               </div>
-            )}
+            </div>
 
-            {/* Finalize result (when ended, no insight) */}
-            {agentCall.phase === "ended" && !agentCall.careInsight && agentCall.finalizeResult && (
-              <div className="mt-3 rounded-[24px] border border-stone-200 bg-stone-50 p-4 text-sm text-stone-600">
-                <p>{agentCall.finalizeResult.summary || "通话已结束，未生成洞察。"}</p>
-                <p className="mt-1 text-xs text-stone-400">提取记忆: {agentCall.finalizeResult.memoriesExtracted} 条</p>
-              </div>
-            )}
+            {/* 操作 */}
+            <div className="mt-5 flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setIdentityCardOpen(false);
+                  clearIdentity();
+                }}
+                className="min-h-10 flex-1 rounded-full bg-[#F2996E] px-4 py-2 text-sm font-medium text-white"
+              >
+                切换身份
+              </button>
+            </div>
+            <p className="mt-2 text-center text-[11px] text-stone-300">
+              身份已记住在本设备，下次进来不用重选
+            </p>
           </div>
         </div>
       )}
@@ -2705,74 +3811,76 @@ export default function HomePage() {
         </div>
       )}
 
-      <section className={activeTab === "home" ? "flex h-full flex-col overflow-hidden pb-[172px]" : "space-y-3 pb-24"}>
+      <section className={activeTab === "home" ? "flex min-h-0 flex-1 flex-col overflow-hidden" : "space-y-3 pb-24"}>
         {activeTab === "home" && (
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] border border-[#E5D4C6] bg-[#F6EEE6] shadow-[0_20px_48px_rgba(145,94,61,0.10)]">
-            <div className="border-b border-[#E5D4C6] bg-[linear-gradient(180deg,#FFFFFF_0%,#FFF6EE_100%)] px-4 py-4 shadow-[0_8px_20px_rgba(145,94,61,0.06)]">
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="text-[17px] font-semibold text-stone-800">家里小助理</p>
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab("assistant")}
-                      className="min-h-8 rounded-full border border-orange-100 bg-white px-3 text-[11px] font-medium text-orange-600"
-                    >
-                      记忆库
-                    </button>
-                  </div>
-                  <p className="mt-1 text-[15px] text-stone-700">想到什么就说，我来帮你整理。</p>
-                  <div className="mt-2 flex items-center gap-2">
-                    <p className="text-[13px] text-orange-500/80">
-                      当前长辈：{currentElder?.relation ?? currentElder?.displayName ?? "未选择"}
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => setIsPeopleDrawerOpen(true)}
-                      className="min-h-8 rounded-full border border-orange-100 bg-white px-3 text-[11px] font-medium text-stone-600"
-                    >
-                      切换长辈
-                    </button>
-                  </div>
+          <>
+            {/* Clean header */}
+            <div className="flex items-center justify-between px-4 py-2.5">
+              <div className="flex items-center gap-2.5">
+                <img src="/assistant-avatar.jpg" alt="小助理" className="h-8 w-8 rounded-full object-cover" />
+                <div>
+                  <p className="text-[15px] font-semibold leading-tight text-stone-800">小助理：念念</p>
+                  <p className="mt-0.5 text-[11px] leading-tight text-stone-400">
+                    {currentElder ? `当前惦记：${currentElder.relation ?? currentElder.displayName}` : ""}
+                  </p>
                 </div>
+              </div>
+              <div className="flex items-center gap-3 text-[12px] text-stone-400">
                 <button
                   type="button"
-                  onClick={() => setUserMode("elder")}
-                  className="min-h-12 shrink-0 rounded-full bg-orange-50 px-4 py-2 text-xs text-stone-600"
+                  onClick={() => setActiveTab("profile")}
+                  className="text-stone-400 transition-colors hover:text-stone-600"
                 >
-                  长辈端
+                  档案
+                </button>
+                <span className="text-stone-200">|</span>
+                <button
+                  type="button"
+                  onClick={() => setIsPeopleDrawerOpen(true)}
+                  className="text-stone-400 transition-colors hover:text-stone-600"
+                >
+                  切换长辈
+                </button>
+                <span className="text-stone-200">|</span>
+                <button
+                  type="button"
+                  onClick={() => setIdentityCardOpen(true)}
+                  className="ml-1 flex h-9 w-9 items-center justify-center rounded-full bg-[#F2996E] text-sm font-medium text-white shadow-sm transition-transform hover:scale-105"
+                  aria-label="我的身份"
+                  title={identity ? CAREGIVERS.find((c) => c.id === identity.personId)?.displayName ?? "我" : "我"}
+                >
+                  {(identity ? CAREGIVERS.find((c) => c.id === identity.personId)?.displayName ?? "我" : "我").slice(0, 1)}
                 </button>
               </div>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto bg-[#F7EFE7] px-3 pb-[188px]">
+            <div ref={childChatScrollRef} className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
               <div className="space-y-3">
+                {/* Today summary - subtle inline */}
                 <div
-                  className={`sticky top-0 z-10 -mx-1 rounded-[18px] border border-[#E8D8C8] bg-[#FFF8EF]/96 px-4 shadow-[0_10px_20px_rgba(145,94,61,0.08)] backdrop-blur ${
-                    isSummaryExpanded ? "py-3" : "py-2"
+                  className={`mx-auto w-fit max-w-full rounded-full bg-orange-50 px-3 ${
+                    isSummaryExpanded ? "py-2" : "py-1.5"
                   }`}
                 >
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-orange-500">今日跟进</p>
-                    <button
-                      type="button"
-                      onClick={() => setIsSummaryExpanded((prev) => !prev)}
-                      className="min-h-8 rounded-full bg-white/80 px-3 text-[11px] font-medium text-stone-600"
-                    >
-                      {isSummaryExpanded ? "收起" : "展开"}
-                    </button>
-                  </div>
-                  {isSummaryExpanded && <p className="mt-1 text-sm leading-6 text-stone-700">{currentSummary}</p>}
+                  <button
+                    type="button"
+                    onClick={() => setIsSummaryExpanded((prev) => !prev)}
+                    className="flex items-center gap-2 text-[11px] text-stone-400"
+                  >
+                    <span>今日跟进</span>
+                    <span className="text-stone-300">{isSummaryExpanded ? "收起" : "展开"}</span>
+                  </button>
+                  {isSummaryExpanded && <p className="mt-1 text-center text-[12px] leading-5 text-stone-500">{currentSummary}</p>}
                 </div>
 
                 {/* Proactive care suggestions (Step 5) */}
                 {proactiveSuggestions.length > 0 && (
                   <div className="space-y-2">
                     {proactiveSuggestions.map((sug, i) => (
-                      <div key={`proactive-${i}`} className="flex justify-start">
-                        <div className="max-w-[88%] rounded-[18px] border border-[#D9E8DB] bg-[#F6FBF7] px-4 py-3 shadow-sm">
-                          <p className="text-[10px] font-medium uppercase tracking-wider text-emerald-500/70">惦记一下</p>
-                          <p className="mt-1.5 text-[15px] leading-7 text-stone-700">{sug.text}</p>
+                      <div key={`proactive-${i}`} className="flex items-start gap-2">
+                        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-[10px] text-emerald-500">心</div>
+                        <div className="flex-1 rounded-2xl rounded-tl-md bg-white/80 px-3.5 py-2.5">
+                          <p className="text-[14px] leading-6 text-stone-600">{sug.text}</p>
                           {sug.action && (
                             <button
                               type="button"
@@ -2792,9 +3900,9 @@ export default function HomePage() {
                                   }
                                 }
                               }}
-                              className="mt-2 min-h-10 rounded-full bg-[#F2996E] px-4 py-1.5 text-xs font-medium text-white"
+                              className="mt-1.5 text-[12px] font-medium text-[#F2996E]"
                             >
-                              {sug.action}
+                              {sug.action} →
                             </button>
                           )}
                         </div>
@@ -2804,52 +3912,52 @@ export default function HomePage() {
                 )}
 
                 {messages.map((message) => (
-                  <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
-                    <div className="relative max-w-[88%]">
-                      <span
-                        aria-hidden="true"
-                        className={`absolute top-4 h-3 w-3 rotate-45 border-b border-r border-[#E2D1C3] bg-[#FFFDFC] ${
-                          message.role === "user" ? "-right-1.5" : "-left-1.5"
-                        }`}
-                      />
-                      <div className="relative rounded-[18px] border border-[#E2D1C3] bg-[#FFFDFC] px-4 py-3 text-[15px] leading-7 text-stone-700 shadow-[0_4px_12px_rgba(145,94,61,0.05)]">
+                  <div key={message.id} className={`flex items-start gap-2 ${message.role === "user" ? "justify-end" : ""}`} {...(message.role === "assistant" ? { "data-assistant-message": "true" } : {})}>
+                    {message.role === "assistant" && (
+                      <img src="/assistant-avatar.jpg" alt="小助理" className="mt-0.5 h-9 w-9 shrink-0 rounded-full object-cover" />
+                    )}
+                    <div className={`max-w-[80%] rounded-2xl px-3.5 py-2.5 text-[14px] leading-6 ${
+                      message.role === "user"
+                        ? "rounded-tr-md bg-[#F2996E] text-white"
+                        : "rounded-tl-md bg-white text-stone-700"
+                    }`}>
                       <p>{message.content}</p>
                       {message.kind === "taskDraft" && message.drafts && (
-                        <div className="mt-3 space-y-3">
+                        <div className="mt-2.5 space-y-2.5">
                           {message.drafts.map((draft) => (
-                            <div key={draft.id} className="rounded-2xl border border-[#F0D9BF] bg-[#FFF4E8] p-4">
-                              <p className="font-semibold text-stone-800">{draft.title}</p>
-                              <div className="mt-3 space-y-1.5 text-sm text-stone-600">
+                            <div key={draft.id} className="rounded-xl bg-orange-50/60 p-3">
+                              <p className="text-[13px] font-semibold text-stone-800">{draft.title}</p>
+                              <div className="mt-2 space-y-1 text-[12px] text-stone-500">
                                 <div className="flex gap-2">
-                                  <span className="text-stone-400">对象</span>
+                                  <span className="w-8 shrink-0 text-stone-400">对象</span>
                                   <span>{draft.elderDisplayName}</span>
                                 </div>
                                 <div className="flex gap-2">
-                                  <span className="text-stone-400">时间</span>
+                                  <span className="w-8 shrink-0 text-stone-400">时间</span>
                                   <span>{draft.remindLabel}</span>
-                                  {draft.repeatRule === "daily" && <span className="text-xs text-orange-400">每日</span>}
+                                  {draft.repeatRule === "daily" && <span className="text-orange-400">每日</span>}
                                 </div>
                                 <div className="flex gap-2">
-                                  <span className="text-stone-400">方式</span>
+                                  <span className="w-8 shrink-0 text-stone-400">方式</span>
                                   <span>{draft.channel}</span>
                                 </div>
                                 <div className="flex gap-2">
-                                  <span className="text-stone-400">提醒</span>
+                                  <span className="w-8 shrink-0 text-stone-400">提醒</span>
                                   <span>{draft.content}</span>
                                 </div>
                                 {draft.relayMessage && (
                                   <div className="flex gap-2">
-                                    <span className="text-stone-400">传话</span>
+                                    <span className="w-8 shrink-0 text-stone-400">传话</span>
                                     <span className="text-orange-600">{draft.relayMessage}</span>
                                   </div>
                                 )}
                               </div>
-                              <div className="mt-4 flex flex-wrap gap-2">
+                              <div className="mt-3">
                                 <button
                                   type="button"
                                   disabled={draft.created}
                                   onClick={() => createTaskFromDraft(draft)}
-                                  className={`min-h-12 rounded-full px-4 py-2 text-xs font-medium ${draft.created ? "bg-stone-100 text-stone-400" : "bg-[#F2996E] text-white"}`}
+                                  className={`min-h-9 rounded-full px-4 py-1.5 text-[12px] font-medium ${draft.created ? "bg-stone-100 text-stone-400" : "bg-[#F2996E] text-white"}`}
                                 >
                                   {draft.created ? "已创建" : "确认创建"}
                                 </button>
@@ -2859,34 +3967,32 @@ export default function HomePage() {
                         </div>
                       )}
                       {message.kind === "note" && message.noteVersions && (
-                        <div className="mt-3 space-y-3">
+                        <div className="mt-2.5 space-y-2">
                           {message.noteVersions.map((version) => (
-                            <div key={version.style} className="rounded-2xl border border-[#F0D9BF] bg-[#FFF4E8] p-4">
-                              <p className="text-xs text-stone-500">{version.style}</p>
-                              <p className="mt-2 text-sm text-stone-700">{version.text}</p>
-                              <div className="mt-3 flex flex-wrap gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => sendNote(version)}
-                                  className="min-h-12 rounded-full bg-white px-3 py-2 text-xs text-stone-700"
-                                >
-                                  发送给{currentElder?.displayName ?? "长辈"}
-                                </button>
-                              </div>
+                            <div key={version.style} className="rounded-xl bg-orange-50/60 p-3">
+                              <p className="text-[11px] text-stone-400">{version.style}</p>
+                              <p className="mt-1.5 text-[13px] text-stone-600">{version.text}</p>
+                              <button
+                                type="button"
+                                onClick={() => sendNote(version)}
+                                className="mt-2 min-h-9 rounded-full bg-white px-3 py-1.5 text-[12px] text-stone-600"
+                              >
+                                发给{currentElder?.displayName ?? "长辈"}
+                              </button>
                             </div>
                           ))}
                         </div>
                       )}
                       {message.role === "assistant" && message.kind === "text" && message.id === messages[0]?.id && (
-                        <div className="mt-3 space-y-2">
-                          <p className="text-[12px] leading-5 text-stone-400">你也可以这样说</p>
-                          <div className="flex flex-wrap gap-2">
+                        <div className="mt-2.5 border-t border-black/5 pt-2">
+                          <p className="text-[11px] text-stone-400">试试这些</p>
+                          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
                             {QUICK_INPUTS.map((sample) => (
                               <button
                                 key={sample}
                                 type="button"
-                                onClick={() => setInput(sample)}
-                                className="rounded-full bg-transparent px-0 text-left text-[12px] leading-5 text-stone-500"
+                                onClick={() => { setInput(sample); scrollToLatestAssistant(); }}
+                                className="text-[12px] text-[#F2996E]"
                               >
                                 {sample}
                               </button>
@@ -2894,24 +4000,21 @@ export default function HomePage() {
                           </div>
                         </div>
                       )}
-                      </div>
                     </div>
                   </div>
                 ))}
                 {isSubmitting && (
-                  <div className="flex justify-start">
-                    <div className="relative max-w-[88%]">
-                      <span aria-hidden="true" className="absolute -left-1.5 top-4 h-3 w-3 rotate-45 border-b border-r border-[#E2D1C3] bg-[#FFFDFC]" />
-                      <div className="rounded-[18px] border border-[#E2D1C3] bg-[#FFFDFC] px-4 py-3 text-[15px] leading-7 text-stone-700 shadow-[0_4px_12px_rgba(145,94,61,0.05)]">
-                        正在帮你想一想...
-                      </div>
+                  <div className="flex items-start gap-2">
+                    <img src="/assistant-avatar.jpg" alt="小助理" className="mt-0.5 h-9 w-9 shrink-0 rounded-full object-cover" />
+                    <div className="rounded-2xl rounded-tl-md bg-white px-3.5 py-2.5 text-[14px] leading-6 text-stone-400">
+                      正在帮你想一想...
                     </div>
                   </div>
                 )}
               </div>
             </div>
 
-          </div>
+          </>
         )}
 
         {activeTab === "tasks" && (
@@ -2969,13 +4072,6 @@ export default function HomePage() {
                     <div className="flex flex-wrap gap-2">
                       <button
                         type="button"
-                        onClick={startAgentCall}
-                        className="min-h-10 rounded-full bg-[#F2996E] px-4 py-2 text-xs font-medium text-white"
-                      >
-                        语音通话
-                      </button>
-                      <button
-                        type="button"
                         onClick={() => applyTaskStatus(task, "completed", task.needResult ? "血糖 6.1" : "做完了")}
                         className="min-h-10 rounded-full bg-emerald-100 px-4 py-2 text-xs text-emerald-700"
                       >
@@ -3024,11 +4120,32 @@ export default function HomePage() {
 
         {activeTab === "profile" && (
           <div className="space-y-4 pb-24">
+            {/* Back button + header */}
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setActiveTab("home")}
+                className="min-h-10 rounded-full bg-orange-50 px-4 text-sm text-orange-600"
+              >
+                返回
+              </button>
+              <h2 className="text-lg font-semibold">长辈档案</h2>
+            </div>
             {/* Elder detail view */}
             {elderDetailId ? (
               (() => {
                 const detailElder = elders.find((e) => e.id === elderDetailId);
                 if (!detailElder) return null;
+                // ── 从记忆库动态派生档案内容 ──
+                const elderMems = memoryEntries.filter((m) => m.elderId === detailElder.id);
+                const healthMems = elderMems.filter((m) => m.category === "elder_health");
+                const habitsMems = elderMems.filter((m) => m.category === "elder_habits");
+                const basicMems = elderMems.filter((m) => m.category === "elder_basic");
+                const contactMems = elderMems.filter((m) => m.category === "elder_contact");
+                const chatMems = elderMems.filter((m) => ["chat_expression", "chat_focus", "chat_language", "chat_taboo"].includes(m.category));
+                const relPrefMems = elderMems.filter((m) => m.category === "rel_preferences");
+                const coreMems = elderMems.filter((m) => ["relationship", "rel_emotional", "rel_events", "rel_history"].includes(m.category));
+                const pendingMems = elderMems.filter((m) => m.category === "pending_review");
                 return (
                   <div className="space-y-4">
                     <button
@@ -3056,8 +4173,8 @@ export default function HomePage() {
                         </button>
                       </div>
                     </div>
-        
-                    {/* Health section */}
+
+                    {/* Health section — 从记忆库 elder_health + elder_habits 派生 */}
                     <div className="rounded-[24px] border border-orange-100 bg-white p-4">
                       <p className="text-sm font-semibold text-stone-700">身体状况</p>
                       <div className="mt-2 flex flex-wrap gap-2">
@@ -3065,19 +4182,29 @@ export default function HomePage() {
                           <span key={item} className="rounded-full bg-rose-50 px-3 py-1 text-xs text-rose-600">{item}</span>
                         ))}
                       </div>
-                      {detailElder.recentSignals && detailElder.recentSignals.length > 0 && (
-                        <div className="mt-3 space-y-1">
-                          {detailElder.recentSignals.map((sig, i) => (
-                            <p key={i} className="text-xs text-stone-500">{sig}</p>
+                      {healthMems.length > 0 && (
+                        <div className="mt-3 space-y-1.5">
+                          {healthMems.map((mem) => (
+                            <div key={mem.id} className="flex gap-1.5">
+                              <span className="mt-0.5 text-rose-300 text-xs">●</span>
+                              <span className="text-xs leading-relaxed text-stone-600">{mem.content}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {habitsMems.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {habitsMems.map((mem) => (
+                            <p key={mem.id} className="text-xs text-stone-500">{mem.content}</p>
                           ))}
                         </div>
                       )}
                     </div>
-        
-                    {/* Personality section */}
+
+                    {/* Personality & Communication — 从记忆库 chat_* + rel_preferences 派生 */}
                     <div className="rounded-[24px] border border-orange-100 bg-white p-4">
                       <p className="text-sm font-semibold text-stone-700">性格与沟通偏好</p>
-                      <div className="mt-2 space-y-1">
+                      <div className="mt-2 space-y-1.5">
                         {(detailElder.personalityTraits ?? []).map((trait, i) => (
                           <p key={i} className="text-sm text-stone-600">{trait}</p>
                         ))}
@@ -3086,23 +4213,69 @@ export default function HomePage() {
                             <span key={pref} className="rounded-full bg-orange-50 px-3 py-1 text-xs text-orange-600">{pref}</span>
                           ))}
                         </div>
+                        {/* 从记忆库同步的沟通偏好条目 */}
+                        {chatMems.length > 0 && (
+                          <div className="mt-3 space-y-1.5 border-t border-stone-100 pt-2">
+                            {chatMems.map((mem) => (
+                              <div key={mem.id} className="flex gap-1.5">
+                                <span className={`mt-0.5 shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-medium ${
+                                  mem.category === "chat_taboo" ? "bg-red-50 text-red-500" :
+                                  mem.category === "chat_expression" ? "bg-orange-50 text-orange-500" :
+                                  "bg-sky-50 text-sky-500"
+                                }`}>
+                                  {mem.category === "chat_taboo" ? "禁忌" : mem.category === "chat_expression" ? "表达" : mem.category === "chat_focus" ? "重点" : "语言"}
+                                </span>
+                                <span className="text-xs leading-relaxed text-stone-600">{mem.content}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        {relPrefMems.length > 0 && (
+                          <div className="mt-2 space-y-1">
+                            {relPrefMems.map((mem) => (
+                              <div key={mem.id} className="flex gap-1.5">
+                                <span className="mt-0.5 text-emerald-300 text-xs">●</span>
+                                <span className="text-xs leading-relaxed text-stone-600">{mem.content}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
-        
-                    {/* Relationship memories */}
+
+                    {/* Core memories — 从记忆库 relationship/rel_* 派生 */}
                     <div className="rounded-[24px] border border-orange-100 bg-white p-4">
                       <p className="text-sm font-semibold text-stone-700">和你的核心记忆</p>
                       <div className="mt-2 space-y-2">
+                        {/* 先展示 Elder 对象原有核心记忆 */}
                         {(detailElder.relationshipMemories ?? []).map((mem, i) => (
-                          <div key={i} className="flex gap-2 text-sm text-stone-600">
+                          <div key={`e${i}`} className="flex gap-2 text-sm text-stone-600">
                             <span className="text-orange-400">-</span>
                             <span>{mem}</span>
                           </div>
                         ))}
+                        {/* 再从记忆库同步的关系记忆条目（去重） */}
+                        {coreMems.map((mem) => (
+                          <div key={mem.id} className="flex gap-2 text-sm text-stone-600">
+                            <span className="text-orange-400">-</span>
+                            <span>{mem.content}</span>
+                          </div>
+                        ))}
+                        {/* 待审核的情绪信号 */}
+                        {pendingMems.length > 0 && (
+                          <div className="mt-2 border-t border-stone-100 pt-2">
+                            {pendingMems.map((mem) => (
+                              <div key={mem.id} className="flex gap-2 text-xs text-violet-500">
+                                <span className="rounded-full bg-violet-50 px-1.5 py-0.5 text-[9px]">待确认</span>
+                                <span>{mem.content}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
-        
-                    {/* Basic info */}
+
+                    {/* Basic info — 从记忆库 elder_basic + elder_contact 补充 */}
                     <div className="rounded-[24px] border border-orange-100 bg-white p-4">
                       <p className="text-sm font-semibold text-stone-700">基础信息</p>
                       <div className="mt-2 space-y-1 text-sm text-stone-600">
@@ -3110,6 +4283,21 @@ export default function HomePage() {
                         <p>电话：{detailElder.phone}</p>
                         <p>方便时间：{detailElder.availableTime}</p>
                         <p>回应习惯：{detailElder.responseHabit || "待补充"}</p>
+                        {/* 从记忆库同步的补充信息 */}
+                        {basicMems.length > 0 && (
+                          <div className="mt-2 space-y-1 border-t border-stone-100 pt-2">
+                            {basicMems.map((mem) => (
+                              <p key={mem.id} className="text-xs leading-relaxed text-stone-500">{mem.content}</p>
+                            ))}
+                          </div>
+                        )}
+                        {contactMems.length > 0 && (
+                          <div className="mt-1 space-y-1">
+                            {contactMems.map((mem) => (
+                              <p key={mem.id} className="text-xs leading-relaxed text-stone-500">{mem.content}</p>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -3213,257 +4401,612 @@ export default function HomePage() {
         )}
 
         {activeTab === "assistant" && (
-          <div className="space-y-4 pb-24">
+          <div className="space-y-3 pb-24">
+            {/* Header */}
             <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-lg font-semibold">小助理记忆库</h2>
-                <p className="mt-1 text-sm text-stone-500">小助理会记住这些，用于更好的电话和对话</p>
-              </div>
+              <h2 className="text-lg font-semibold">记忆库</h2>
+            </div>
+
+            {/* Main tabs - segmented control */}
+            <div className="flex rounded-full bg-orange-50 p-1">
+              {([
+                { key: "family_info" as const, label: "家人信息" },
+                { key: "relationship" as const, label: "关系" },
+                { key: "chat_style" as const, label: "聊天风格" },
+              ]).map((tab) => (
+                <button
+                  key={tab.key}
+                  type="button"
+                  onClick={() => { setMemMainTab(tab.key); setMemSubTab("all"); }}
+                  className={`flex-1 rounded-full py-2 text-[12px] font-medium transition-all ${
+                    memMainTab === tab.key ? "bg-white text-stone-800 shadow-sm" : "text-stone-500"
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Sub tabs */}
+            <div className="flex gap-2 overflow-x-auto pb-1">
               <button
                 type="button"
-                onClick={() => setActiveTab("home")}
-                className="min-h-10 rounded-full bg-orange-50 px-4 py-2 text-xs text-stone-700"
+                onClick={() => setMemSubTab("all")}
+                className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-medium transition-colors ${
+                  memSubTab === "all" ? "bg-[#F2996E] text-white" : "bg-orange-50 text-orange-700/80"
+                }`}
               >
-                返回
+                全部
+              </button>
+              {MEM_SUB_CATS[memMainTab].map((sub) => (
+                <button
+                  key={sub.key}
+                  type="button"
+                  onClick={() => setMemSubTab(sub.key)}
+                  className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-medium transition-colors ${
+                    memSubTab === sub.key ? "bg-[#F2996E] text-white" : "bg-orange-50 text-orange-700/80"
+                  }`}
+                >
+                  {sub.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Action buttons */}
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => { setShowAddMem((v) => !v); setNewMemoryText(""); }}
+                className="flex flex-1 items-center justify-center gap-2 rounded-2xl border border-dashed border-orange-200 bg-orange-50/40 py-3.5 text-sm font-medium text-orange-600 transition-colors hover:bg-orange-50"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+                记录
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowImportModal(true)}
+                className="flex flex-1 items-center justify-center gap-2 rounded-2xl border border-dashed border-orange-200 bg-orange-50/40 py-3.5 text-sm font-medium text-orange-600 transition-colors hover:bg-orange-50"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+                </svg>
+                导入
               </button>
             </div>
 
-            {/* Call insights (Step 4) */}
-            {callInsights.length > 0 && (
-              <div className="rounded-[24px] border border-emerald-200 bg-emerald-50/50 p-4">
-                <p className="text-sm font-semibold text-emerald-700">亲情洞察</p>
-                <p className="mt-1 text-xs text-emerald-600/70">每次通话后自动生成，帮你更好地理解长辈</p>
-                <div className="mt-3 space-y-3">
-                  {callInsights.slice(0, 5).map((insight) => (
-                    <div key={insight.id} className="rounded-2xl border border-emerald-100 bg-white p-3">
-                      <div className="flex items-center justify-between">
-                        <p className="text-sm font-medium text-stone-700">{insight.elderDisplayName}</p>
-                        <span className="text-xs text-stone-400">{insight.createdAt}</span>
-                      </div>
-                      {insight.factualSummary && (
-                        <p className="mt-2 text-sm text-stone-600">{insight.factualSummary}</p>
-                      )}
-                      <p className="mt-2 text-sm text-stone-500">{insight.relationshipInsight}</p>
-                      <div className="mt-2 rounded-xl bg-orange-50 px-3 py-2">
-                        <p className="text-xs text-orange-600">{insight.suggestedAction}</p>
-                      </div>
-                      {insight.suggestedMessage && (
-                        <div className="mt-2 flex items-center gap-2">
-                          <p className="flex-1 rounded-xl bg-stone-50 px-3 py-2 text-xs text-stone-500">{insight.suggestedMessage}</p>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setInput(insight.suggestedMessage);
-                              setActiveTab("home");
-                            }}
-                            className="shrink-0 rounded-full bg-[#F2996E] px-3 py-1.5 text-xs font-medium text-white"
-                          >
-                            用这句
-                          </button>
+            {/* Add memory form (inline) */}
+            {showAddMem && (
+              <div className="rounded-2xl border border-orange-100 bg-white p-4 shadow-sm">
+                <p className="text-sm font-semibold text-stone-700">记录新记忆</p>
+                <textarea
+                  value={newMemoryText}
+                  onChange={(e) => setNewMemoryText(e.target.value)}
+                  placeholder="比如：妈妈不喜欢别人说她身体不好"
+                  className="mt-2 min-h-20 w-full resize-none rounded-xl border border-orange-100 bg-orange-50/60 px-3.5 py-3 text-sm outline-none"
+                />
+                <div className="mt-2 flex gap-2">
+                  <select
+                    value={addMemSubCat}
+                    onChange={(e) => setAddMemSubCat(e.target.value as MemoryCategory)}
+                    className="min-h-10 rounded-full border border-orange-100 bg-orange-50/60 px-3 text-sm"
+                  >
+                    {MEM_SUB_CATS[memMainTab].map((sub) => (
+                      <option key={sub.key} value={sub.key}>{sub.label}</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const text = newMemoryText.trim();
+                      if (!text) return;
+                      setMemoryEntries((prev) => [...prev, {
+                        id: uid("mem"),
+                        category: addMemSubCat,
+                        content: text,
+                        source: "user_manual_input",
+                        importance: "medium",
+                        createdAt: nowLabel(),
+                      }]);
+                      setNewMemoryText("");
+                      setShowAddMem(false);
+                    }}
+                    className="min-h-10 flex-1 rounded-full bg-[#F2996E] px-4 text-sm font-medium text-white"
+                  >
+                    保存
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setShowAddMem(false); setNewMemoryText(""); }}
+                    className="min-h-10 rounded-full bg-stone-100 px-4 text-sm text-stone-600"
+                  >
+                    取消
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Memory list */}
+            {(() => {
+              const filteredEntries = memoryEntries.filter((m) => {
+                if (memSubTab === "all") {
+                  return MEM_MAIN_TAB_CATS[memMainTab].includes(m.category);
+                }
+                return m.category === memSubTab;
+              });
+
+              if (filteredEntries.length === 0) {
+                return (
+                  <div className="flex flex-col items-center justify-center py-16 text-center">
+                    <div className="flex h-14 w-14 items-center justify-center rounded-full bg-orange-50">
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-orange-300">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                        <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
+                      </svg>
+                    </div>
+                    <p className="mt-4 text-sm font-medium text-stone-500">暂无记忆</p>
+                    <p className="mt-1 text-xs text-stone-400">点击「记录」开始添加</p>
+                  </div>
+                );
+              }
+
+              return (
+                <div className="space-y-2">
+                  {filteredEntries.map((mem) => (
+                    <div key={mem.id} className="rounded-2xl bg-white p-3.5 shadow-sm">
+                      {editingMemId === mem.id ? (
+                        <div>
+                          <textarea
+                            value={editingMemText}
+                            onChange={(e) => setEditingMemText(e.target.value)}
+                            className="min-h-16 w-full resize-none rounded-xl border border-orange-200 bg-orange-50/60 px-3 py-2.5 text-sm outline-none"
+                          />
+                          <div className="mt-2 flex gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const text = editingMemText.trim();
+                                if (!text) return;
+                                setMemoryEntries((prev) => prev.map((m) => m.id === mem.id ? { ...m, content: text } : m));
+                                setEditingMemId(null);
+                                setEditingMemText("");
+                              }}
+                              className="min-h-9 rounded-full bg-[#F2996E] px-4 text-xs font-medium text-white"
+                            >
+                              保存
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => { setEditingMemId(null); setEditingMemText(""); }}
+                              className="min-h-9 rounded-full bg-stone-100 px-4 text-xs text-stone-600"
+                            >
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div>
+                          <p className="text-sm leading-relaxed text-stone-700">{mem.content}</p>
+                          <div className="mt-2.5 flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] text-stone-400">{mem.createdAt}</span>
+                              {mem.importance === "high" && (
+                                <span className="rounded-full bg-orange-100 px-1.5 py-0.5 text-[10px] text-orange-600">重要</span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => { setEditingMemId(mem.id); setEditingMemText(mem.content); }}
+                                className="flex h-7 w-7 items-center justify-center rounded-full text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-600"
+                                title="编辑"
+                              >
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                                  <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                                </svg>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setMemoryEntries((prev) => prev.filter((m) => m.id !== mem.id))}
+                                className="flex h-7 w-7 items-center justify-center rounded-full text-stone-400 transition-colors hover:bg-red-50 hover:text-red-500"
+                                title="删除"
+                              >
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                                  <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                                </svg>
+                              </button>
+                            </div>
+                          </div>
                         </div>
                       )}
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
-            {/* Memory categories */}
-            {([
-              { key: "about_user" as const, label: "关于你" },
-              { key: "about_elder" as const, label: "关于长辈" },
-              { key: "relationship" as const, label: "关于你们的关系" },
-              { key: "communication_style" as const, label: "沟通风格" },
-              { key: "pending_review" as const, label: "待确认记忆" },
-            ]).map((cat) => {
-              const entries = memoryEntries.filter((m) => m.category === cat.key);
-              if (entries.length === 0) return null;
-              return (
-                <div key={cat.key} className="rounded-[24px] border border-orange-100 bg-white p-4 shadow-[0_8px_24px_rgba(242,153,110,0.08)]">
+            {/* Import modal */}
+            {showImportModal && (
+              <div
+                className="fixed inset-0 z-50 flex items-end justify-center bg-black/30 backdrop-blur-sm sm:items-center"
+                onClick={() => resetImportModal()}
+              >
+                <div
+                  className="flex max-h-[90vh] w-full max-w-lg flex-col rounded-t-3xl bg-white p-6 sm:rounded-3xl"
+                  onClick={(e) => e.stopPropagation()}
+                >
                   <div className="flex items-center justify-between">
-                    <p className="text-sm font-semibold text-stone-700">{cat.label}</p>
-                    {cat.key === "pending_review" && (
-                      <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">{entries.length} 条待确认</span>
-                    )}
+                    <h3 className="text-base font-semibold text-stone-800">导入记忆</h3>
+                    <button
+                      type="button"
+                      onClick={() => resetImportModal()}
+                      className="flex h-8 w-8 items-center justify-center rounded-full text-stone-400 transition-colors hover:bg-stone-100"
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                        <path d="M18 6 6 18M6 6l12 12" />
+                      </svg>
+                    </button>
                   </div>
-                  <div className="mt-3 space-y-2">
-                    {entries.map((mem) => (
-                      <div key={mem.id} className="flex items-start justify-between gap-2 rounded-xl bg-stone-50/70 px-3 py-2">
-                        <div className="flex-1">
-                          <p className="text-sm text-stone-600">{mem.content}</p>
-                          {mem.importance === "high" && (
-                            <p className="mt-0.5 text-xs text-orange-400">重要</p>
-                          )}
-                        </div>
-                        <div className="flex shrink-0 gap-1">
-                          {cat.key === "pending_review" && (
+                  <p className="mt-1 text-xs text-stone-500">支持病历图片、聊天记录、Word、PDF，自动识别文字并提炼事实</p>
+
+                  {/* OCR health banner */}
+                  {ocrAvailable === false && (
+                    <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      OCR 服务未启动，图片与扫描件 PDF 暂不可用。
+                      <code className="ml-1 rounded bg-amber-100 px-1.5 py-0.5">npm run ocr:start</code>
+                    </div>
+                  )}
+                  {ocrAvailable === true && (
+                    <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] text-emerald-700">
+                      ✓ OCR 服务就绪
+                    </div>
+                  )}
+
+                  {/* File upload area - only show when not yet uploaded or in manual mode */}
+                  {importStatus === "idle" && (
+                    <label className="mt-4 flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-orange-200 bg-orange-50/40 py-8 transition-colors hover:border-orange-300 hover:bg-orange-50/60">
+                      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="text-orange-400">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
+                      </svg>
+                      <p className="mt-2 text-sm text-stone-600">点击上传图片或文档</p>
+                      <p className="mt-0.5 text-xs text-stone-400">JPG · PNG · WebP · DOCX · PDF · TXT</p>
+                      <input
+                        type="file"
+                        accept="image/*,.docx,.pdf,.txt"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) void handleImportFile(file);
+                          e.target.value = ""; // 允许选同一个文件
+                        }}
+                      />
+                    </label>
+                  )}
+
+                  {/* Progress display */}
+                  {importStatus !== "idle" && importStatus !== "done" && importStatus !== "error" && (
+                    <div className="mt-4 flex flex-col items-center justify-center rounded-2xl border border-orange-100 bg-orange-50/30 px-4 py-6">
+                      <div className="h-8 w-8 animate-spin rounded-full border-2 border-orange-200 border-t-[#F2996E]" />
+                      <p className="mt-3 text-sm text-stone-700">
+                        {importStatus === "uploading" && "正在上传…"}
+                        {importStatus === "parsing" && (
+                          <>
+                            正在解析 {importFileMeta?.name ?? "文件"}
+                            {importFileMeta?.parser === "pdf-ocr" && "（扫描件，需 OCR）"}
+                            …
+                          </>
+                        )}
+                        {importStatus === "extracting" && "念念正在帮你提炼关键信息…"}
+                      </p>
+                      {importFileMeta?.size !== undefined && (
+                        <p className="mt-1 text-[11px] text-stone-400">
+                          {(importFileMeta.size / 1024).toFixed(0)} KB
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Error display */}
+                  {importStatus === "error" && (
+                    <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3 py-3 text-xs text-rose-800">
+                      <p className="font-medium">{importError ?? "处理失败"}</p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setImportStatus("idle");
+                          setImportError(null);
+                          setImportFileMeta(null);
+                        }}
+                        className="mt-2 text-[11px] text-rose-600 underline"
+                      >
+                        重试 / 换文件
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Done state: split view (raw text + candidates) */}
+                  {importStatus === "done" && importFileMeta && !importManualMode && (
+                    <div className="mt-4 flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
+                      {/* Header meta */}
+                      <div className="flex items-center justify-between text-[11px] text-stone-500">
+                        <span>
+                          {importFileMeta.name} · {importFileMeta.parser} · {importFileMeta.durationMs}ms
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setImportManualMode(true)}
+                          className="text-stone-500 underline"
+                        >
+                          改为手动贴入
+                        </button>
+                      </div>
+
+                      {/* Tabs for candidate groups */}
+                      <div className="flex gap-1 rounded-full bg-stone-100 p-1">
+                        {(["family_info", "relationship", "chat_style"] as const).map((tab) => {
+                          const count = importCandidates.filter(
+                            (c) => MAIN_TAB_BY_CATEGORY[c.category] === tab,
+                          ).length;
+                          return (
                             <button
+                              key={tab}
                               type="button"
-                              onClick={() => {
-                                setMemoryEntries((prev) => prev.map((m) => m.id === mem.id ? { ...m, category: "about_elder" } : m));
-                              }}
-                              className="rounded-lg bg-emerald-100 px-2 py-1 text-xs text-emerald-700"
+                              onClick={() => setImportCandidateTab(tab)}
+                              className={`flex-1 rounded-full py-1.5 text-[12px] font-medium transition-colors ${
+                                importCandidateTab === tab ? "bg-white text-stone-800 shadow-sm" : "text-stone-500"
+                              }`}
                             >
-                              确认
+                              {MAIN_TAB_LABEL[tab]} {count > 0 && <span className="text-stone-400">({count})</span>}
                             </button>
+                          );
+                        })}
+                      </div>
+
+                      {/* Body: split view */}
+                      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-hidden sm:grid-cols-2">
+                        {/* Left: raw text */}
+                        <details className="rounded-xl border border-stone-200 bg-stone-50/50">
+                          <summary className="cursor-pointer px-3 py-2 text-[11px] font-medium text-stone-600">
+                            原文（可点开查看）
+                          </summary>
+                          <pre className="max-h-64 overflow-auto whitespace-pre-wrap px-3 pb-3 text-[11px] text-stone-700">
+                            {importRawText || "（原文为空）"}
+                          </pre>
+                        </details>
+
+                        {/* Right: candidates for current tab */}
+                        <div className="flex min-h-0 flex-col gap-2 overflow-y-auto rounded-xl border border-orange-100 bg-orange-50/30 p-2">
+                          {importCandidates.filter(
+                            (c) => MAIN_TAB_BY_CATEGORY[c.category] === importCandidateTab,
+                          ).length === 0 ? (
+                            <p className="px-2 py-4 text-center text-[11px] text-stone-400">
+                              {importCandidates.length === 0
+                                ? "念念没找到可提炼的内容，可以手动从原文复制"
+                                : `本分类无候选（共 ${importCandidates.length} 条在其他分类）`}
+                            </p>
+                          ) : (
+                            importCandidates
+                              .filter((c) => MAIN_TAB_BY_CATEGORY[c.category] === importCandidateTab)
+                              .map((c) => (
+                                <div
+                                  key={c.id}
+                                  className="rounded-lg border border-orange-200/60 bg-white p-2.5"
+                                >
+                                  <div className="flex items-start gap-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={c.selected}
+                                      onChange={(e) => {
+                                        setImportCandidates((prev) =>
+                                          prev.map((p) =>
+                                            p.id === c.id ? { ...p, selected: e.target.checked } : p,
+                                          ),
+                                        );
+                                      }}
+                                      className="mt-1 h-4 w-4 shrink-0 accent-[#F2996E]"
+                                    />
+                                    <div className="min-w-0 flex-1">
+                                      {editingCandidateId === c.id ? (
+                                        <textarea
+                                          value={editingCandidateText}
+                                          onChange={(e) => setEditingCandidateText(e.target.value)}
+                                          onBlur={() => {
+                                            setImportCandidates((prev) =>
+                                              prev.map((p) =>
+                                                p.id === c.id ? { ...p, content: editingCandidateText } : p,
+                                              ),
+                                            );
+                                            setEditingCandidateId(null);
+                                          }}
+                                          autoFocus
+                                          className="min-h-12 w-full resize-none rounded border border-orange-200 px-2 py-1 text-[12px] outline-none"
+                                        />
+                                      ) : (
+                                        <p
+                                          className="cursor-text text-[12px] text-stone-800"
+                                          onClick={() => {
+                                            setEditingCandidateId(c.id);
+                                            setEditingCandidateText(c.content);
+                                          }}
+                                        >
+                                          {c.content}
+                                        </p>
+                                      )}
+                                      <p className="mt-1 text-[10px] text-stone-400">
+                                        {SUB_CAT_LABEL[c.category]} · 置信 {Math.round(c.confidence * 100)}%
+                                      </p>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setImportCandidates((prev) => prev.filter((p) => p.id !== c.id));
+                                      }}
+                                      className="shrink-0 text-stone-300 hover:text-rose-500"
+                                      aria-label="删除"
+                                    >
+                                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                                        <path d="M18 6 6 18M6 6l12 12" />
+                                      </svg>
+                                    </button>
+                                  </div>
+                                </div>
+                              ))
                           )}
-                          <button
-                            type="button"
-                            onClick={() => setMemoryEntries((prev) => prev.filter((m) => m.id !== mem.id))}
-                            className="rounded-lg bg-stone-200 px-2 py-1 text-xs text-stone-500"
-                          >
-                            删除
-                          </button>
                         </div>
                       </div>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
 
-            {/* Add memory */}
-            <div className="rounded-[24px] border border-orange-100 bg-white p-4">
-              <p className="text-sm font-semibold text-stone-700">手动添加记忆</p>
-              <textarea
-                value={newMemoryText}
-                onChange={(e) => setNewMemoryText(e.target.value)}
-                placeholder="比如：妈妈不喜欢别人说她身体不好"
-                className="mt-2 min-h-16 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-sm outline-none"
-              />
-              <div className="mt-2 flex gap-2">
-                <select
-                  value={newMemoryCategory}
-                  onChange={(e) => setNewMemoryCategory(e.target.value as MemoryCategory)}
-                  className="min-h-10 rounded-full border border-orange-100 bg-orange-50/60 px-3 text-sm"
-                >
-                  <option value="about_user">关于你</option>
-                  <option value="about_elder">关于长辈</option>
-                  <option value="relationship">关系记忆</option>
-                  <option value="communication_style">沟通风格</option>
-                </select>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const text = newMemoryText.trim();
-                    if (!text) return;
-                    setMemoryEntries((prev) => [...prev, {
-                      id: uid("mem"),
-                      category: newMemoryCategory,
-                      content: text,
-                      source: "user_manual_input",
-                      importance: "medium",
-                      createdAt: nowLabel(),
-                    }]);
-                    setNewMemoryText("");
-                  }}
-                  className="min-h-10 flex-1 rounded-full bg-[#F2996E] px-4 text-sm font-medium text-white"
-                >
-                  添加
-                </button>
+                      {/* Confirm bar */}
+                      <div className="flex gap-2 border-t border-stone-100 pt-3">
+                        <button
+                          type="button"
+                          onClick={() => resetImportModal()}
+                          className="min-h-10 shrink-0 rounded-full border border-stone-200 px-4 text-sm text-stone-600"
+                        >
+                          取消
+                        </button>
+                        <button
+                          type="button"
+                          disabled={importCandidates.filter((c) => c.selected).length === 0}
+                          onClick={() => confirmImportCandidates()}
+                          className="min-h-10 flex-1 rounded-full bg-[#F2996E] text-sm font-medium text-white disabled:bg-stone-200"
+                        >
+                          导入 {importCandidates.filter((c) => c.selected).length} 条
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Manual mode: original behavior preserved for fallback */}
+                  {importStatus === "done" && importManualMode && (
+                    <div className="mt-4 flex flex-1 flex-col gap-3 overflow-hidden">
+                      <div className="flex items-center justify-between text-[11px] text-stone-500">
+                        <span>手动贴入模式</span>
+                        <button
+                          type="button"
+                          onClick={() => setImportManualMode(false)}
+                          className="text-stone-500 underline"
+                        >
+                          返回候选
+                        </button>
+                      </div>
+                      {importFilePreview && (
+                        <div className="overflow-hidden rounded-xl border border-stone-200">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={importFilePreview} alt="预览" className="max-h-32 w-full object-cover" />
+                        </div>
+                      )}
+                      <textarea
+                        value={importText}
+                        onChange={(e) => setImportText(e.target.value)}
+                        placeholder="识别结果将显示在这里，可手动编辑..."
+                        className="min-h-24 w-full resize-none rounded-xl border border-orange-100 bg-orange-50/60 px-3.5 py-3 text-sm outline-none"
+                      />
+                      <div className="flex gap-2">
+                        <select
+                          value={addMemSubCat}
+                          onChange={(e) => setAddMemSubCat(e.target.value as MemoryCategory)}
+                          className="min-h-10 flex-1 rounded-full border border-orange-100 bg-orange-50/60 px-3 text-sm"
+                        >
+                          {MEM_SUB_CATS[memMainTab].map((sub) => (
+                            <option key={sub.key} value={sub.key}>{sub.label}</option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          disabled={!importText.trim()}
+                          onClick={() => confirmManualImport()}
+                          className="min-h-10 shrink-0 rounded-full bg-[#F2996E] px-5 text-sm font-medium text-white disabled:bg-stone-200"
+                        >
+                          确认导入
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
+            )}
           </div>
         )}
       </section>
 
       {activeTab === "home" ? (
-        <div className="fixed inset-x-0 bottom-0 z-30 mx-auto max-w-5xl px-3 sm:px-4">
-          <div className="overflow-hidden rounded-[26px] border border-[#E2D1C3] bg-white shadow-[0_18px_40px_rgba(145,94,61,0.14)]">
-            <div className="bg-[linear-gradient(180deg,#FFF8F1_0%,#FFF1E5_100%)] px-3 pb-2 pt-3">
-              <div className="mb-2 grid grid-cols-3 gap-2">
+        <div className="shrink-0 bg-white/60 px-4 pb-[calc(4px+env(safe-area-inset-bottom))] pt-2">
+          {/* Quick actions - subtle inline chips */}
+          <div className="mb-2 flex gap-2 overflow-x-auto pb-1">
+            {[
+              { label: "发提醒", action: () => triggerQuickAction("remind") },
+              { label: "写纸条", action: () => triggerQuickAction("note") },
+              { label: "看状态", action: () => triggerQuickAction("status") },
+            ].map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                onClick={item.action}
+                className="shrink-0 rounded-full bg-orange-50 px-3 py-1.5 text-[12px] text-orange-700/80"
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+          {/* Input row */}
+          <div className="flex items-center gap-2 pb-2">
+            <textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              placeholder="突然想起什么..."
+              rows={1}
+              className="min-h-10 flex-1 resize-none rounded-2xl bg-white px-3.5 py-2.5 text-[14px] text-stone-700 outline-none"
+            />
+            <button
+              type="button"
+              disabled={isSubmitting || !input.trim()}
+              onClick={() => handleAgentSubmit()}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-[13px] font-medium text-white transition-colors disabled:bg-stone-200"
+              style={{ backgroundColor: isSubmitting || !input.trim() ? undefined : "#F2996E" }}
+            >
+              {isSubmitting ? "···" : "发送"}
+            </button>
+          </div>
+          {/* Tab bar */}
+          <div className="grid grid-cols-3 border-t border-black/5 pt-1.5">
+            {TABS.map((tab) => {
+              const isActive = navActiveTab === tab.key;
+              return (
                 <button
+                  key={tab.key}
                   type="button"
-                  onClick={() => triggerQuickAction("remind")}
-                  className="min-h-11 rounded-[18px] border border-[#E2D1C3] bg-white text-xs font-medium text-stone-700"
+                  onClick={() => setActiveTab(tab.key)}
+                  className={`min-h-10 text-[12px] font-medium transition-colors ${
+                    isActive
+                      ? "text-[#F2996E]"
+                      : "text-stone-400"
+                  }`}
                 >
-                  发个提醒
+                  {tab.label}
                 </button>
-                <button
-                  type="button"
-                  onClick={() => triggerQuickAction("note")}
-                  className="min-h-11 rounded-[18px] border border-[#E2D1C3] bg-white text-xs font-medium text-stone-700"
-                >
-                  写小纸条
-                </button>
-                <button
-                  type="button"
-                  onClick={() => triggerQuickAction("status")}
-                  className="min-h-11 rounded-[18px] border border-[#E2D1C3] bg-white text-xs font-medium text-stone-700"
-                >
-                  看长辈状态
-                </button>
-              </div>
-              <div className="flex items-end gap-2 rounded-[22px] border border-[#E2D1C3] bg-[#FFF9F4] px-3 py-3">
-                <textarea
-                  value={input}
-                  onChange={(event) => setInput(event.target.value)}
-                  placeholder="突然想起什么，就告诉我..."
-                  className="min-h-12 flex-1 resize-none rounded-[22px] border border-[#E2D1C3] bg-white px-4 py-3 text-[15px] text-stone-700 outline-none"
-                />
-                <button
-                  type="button"
-                  disabled={isSubmitting}
-                  onClick={() => handleAgentSubmit()}
-                  className={`min-h-12 shrink-0 rounded-full px-5 py-2 text-sm font-medium text-white ${isSubmitting ? "bg-orange-200" : "bg-[#F2996E]"}`}
-                >
-                  {isSubmitting ? "思考中" : "发送"}
-                </button>
-              </div>
-            </div>
-            <div className="grid grid-cols-3 gap-2 border-t border-[#E2D1C3] bg-white/98 p-2 pb-[calc(4px+env(safe-area-inset-bottom))]">
-              {TABS.map((tab) => (
-                (() => {
-                  const isActive = navActiveTab === tab.key;
-                  return (
-                    <button
-                      key={tab.key}
-                      type="button"
-                      onClick={() => setActiveTab(tab.key)}
-                      className={`rounded-[18px] px-2 text-xs font-medium ${
-                        isActive
-                          ? tab.key === "home"
-                            ? "min-h-12 bg-[#F2996E] text-white"
-                            : "min-h-12 bg-orange-50 text-stone-800"
-                          : tab.key === "home"
-                            ? "min-h-12 bg-orange-50 text-stone-700"
-                            : "min-h-12 bg-transparent text-stone-500"
-                      }`}
-                    >
-                      {tab.label}
-                    </button>
-                  );
-                })()
-              ))}
-            </div>
+              );
+            })}
           </div>
         </div>
       ) : (
-        <div className="fixed inset-x-0 bottom-0 z-30 mx-auto max-w-5xl px-3 pb-[calc(4px+env(safe-area-inset-bottom))] pt-0 sm:px-4">
-          <div className="grid grid-cols-3 gap-2 rounded-[26px] border border-orange-100 bg-white/95 p-2 shadow-[0_18px_40px_rgba(242,153,110,0.18)] backdrop-blur">
-            {TABS.map((tab) => (
-              (() => {
-                const isActive = navActiveTab === tab.key;
-                return (
-                  <button
-                    key={tab.key}
-                    type="button"
-                    onClick={() => setActiveTab(tab.key)}
-                    className={`rounded-[18px] px-2 text-xs font-medium ${
-                      isActive
-                        ? tab.key === "home"
-                          ? "min-h-12 bg-[#F2996E] text-white"
-                          : "min-h-12 bg-orange-50 text-stone-800"
-                        : tab.key === "home"
-                          ? "min-h-12 bg-orange-50 text-stone-700"
-                          : "min-h-12 bg-transparent text-stone-500"
-                    }`}
-                  >
-                    {tab.label}
-                  </button>
-                );
-              })()
-            ))}
+        <div className="fixed inset-x-0 bottom-0 z-30 mx-auto max-w-5xl border-t border-black/5 bg-white/80 px-4 pb-[calc(4px+env(safe-area-inset-bottom))] pt-1.5 backdrop-blur sm:px-4">
+          <div className="grid grid-cols-3">
+            {TABS.map((tab) => {
+              const isActive = navActiveTab === tab.key;
+              return (
+                <button
+                  key={tab.key}
+                  type="button"
+                  onClick={() => setActiveTab(tab.key)}
+                  className={`min-h-10 text-[12px] font-medium transition-colors ${
+                    isActive ? "text-[#F2996E]" : "text-stone-400"
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}

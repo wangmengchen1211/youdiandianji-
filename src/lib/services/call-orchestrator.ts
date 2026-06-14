@@ -8,16 +8,21 @@ import type {
 } from "../store/types";
 import { MockTelephonyProvider } from "../telephony/mock-telephony-provider";
 import { composeRelationshipContext } from "../agents/relationship-context-composer";
+import { composeFamilyContext } from "../agents/family-context-composer";
 import { generateCallPlan } from "../agents/call-plan-generator";
 import { generateConversationReply } from "../agents/relational-conversation";
-import { extractResponseUnderstanding } from "../agents/response-understanding";
+import { extractResponseUnderstanding, extractPostCallSummary } from "../agents/response-understanding";
 import { extractMemories } from "../agents/memory-curator";
 import { generateCareInsight } from "../agents/care-insight-writer";
-import { sanitizeAssistantReply, sanitizeCareInsight } from "../agents/safety-guard";
+import { sanitizeAssistantReply, sanitizeCareInsight, checkSafety } from "../agents/safety-guard";
+import { planTurn } from "../agents/turn-planner";
 import {
   createInitialState,
   nextStage,
   shouldListenAndReflect,
+  shouldEnterListenAndReflect,
+  shouldEndCall,
+  updateProbeBudget,
 } from "./conversation-state-machine";
 import { updateOccurrenceStatus } from "./task-occurrence-service";
 import { getExistingMemoryContents } from "./memory-service";
@@ -137,8 +142,17 @@ export async function startCall(taskOccurrenceId: string): Promise<{
 }
 
 /**
- * Process one turn of the conversation.
- * Receives elder input, runs Response Understanding, advances state, generates next reply.
+ * Process one turn of the conversation (refactored with TurnPlanner).
+ * New flow:
+ * 1. Load session + state + callPlan + familyContext
+ * 2. Append elderText to transcript
+ * 3. Call turnPlanner.planTurn() [merged: analysis + planning + generation]
+ * 4. Validate with safetyGuard
+ * 5. Merge state_patch into conversationState
+ * 6. Enforce deterministic constraints
+ * 7. Append assistantText to transcript
+ * 8. Persist session
+ * 9. Return enhanced response
  */
 export async function processTurn(
   sessionId: string,
@@ -148,6 +162,11 @@ export async function processTurn(
   stage: CallStage;
   taskSlots: Record<string, unknown>;
   isCallEnding: boolean;
+  probeBudget?: ConversationState["probeBudget"];
+  emotion?: { label: string; confidence: number };
+  relationshipSignals?: { type: string; content: string }[];
+  statePatch?: Record<string, unknown>;
+  safety?: { safe: boolean; repaired: boolean };
 }> {
   const session = store.getCallSession(sessionId);
   if (!session) throw new Error(`CallSession ${sessionId} not found`);
@@ -156,7 +175,10 @@ export async function processTurn(
   const occ = store.getTaskOccurrence(session.taskOccurrenceId);
   const template = store.getTaskTemplate(occ?.taskTemplateId ?? "");
 
-  // Add elder input to transcript
+  // 1. Load family context
+  const familyContext = composeFamilyContext(session.elderId, session.caregiverId);
+
+  // 2. Append elder input to transcript
   session.transcript.push({
     speaker: "elder",
     text: elderInput,
@@ -164,66 +186,105 @@ export async function processTurn(
     timestamp: new Date().toISOString(),
   });
 
-  // Run Response Understanding (every turn)
-  const understanding = await extractResponseUnderstanding(
+  // Update utterance tracking
+  session.conversationState.lastElderUtterance = elderInput;
+
+  // 3. Call TurnPlanner (merged: analysis + planning + generation)
+  const turn = await planTurn(
     elderInput,
-    template?.requiredSlots ?? []
+    session.callPlan,
+    session.conversationState,
+    familyContext,
+    session.transcript
   );
 
-  // Update conversation state with extracted slots
-  session.conversationState.taskSlots = {
-    ...session.conversationState.taskSlots,
-    ...understanding.slots,
-  };
-  if (understanding.messageToChild) {
-    session.conversationState.relationshipSlots.message_to_child =
-      understanding.messageToChild;
+  // 4. Validate with Safety Guard (two-layer check)
+  const safetyResult = checkSafety(turn.next.assistantText);
+  let assistantReply = turn.next.assistantText;
+  let repaired = false;
+
+  if (!safetyResult.safe && safetyResult.repairedReply) {
+    assistantReply = safetyResult.repairedReply;
+    repaired = true;
   }
-  session.conversationState.riskSignals = [
-    ...session.conversationState.riskSignals,
-    ...understanding.riskSignals,
-  ];
 
-  // Determine next stage via state machine
-  let currentStage = session.conversationState.stage;
+  // 5. Merge state_patch into conversationState
+  if (turn.statePatch.taskSlots) {
+    session.conversationState.taskSlots = {
+      ...session.conversationState.taskSlots,
+      ...turn.statePatch.taskSlots,
+    };
+  }
+  if (turn.statePatch.relationshipSlots) {
+    session.conversationState.relationshipSlots = {
+      ...session.conversationState.relationshipSlots,
+      ...turn.statePatch.relationshipSlots,
+    };
+  }
+  if (turn.statePatch.probeBudget) {
+    updateProbeBudget(session.conversationState, turn.statePatch.probeBudget);
+  }
+  if (turn.statePatch.elderWillingness) {
+    session.conversationState.elderWillingness = turn.statePatch.elderWillingness;
+  }
+  if (turn.statePatch.shouldCloseSoon !== undefined) {
+    session.conversationState.shouldCloseSoon = turn.statePatch.shouldCloseSoon;
+  }
 
-  // Special: if at open_care_question and elder shows emotion, enter listen_and_reflect
-  if (currentStage === "open_care_question" && shouldListenAndReflect(elderInput)) {
-    currentStage = "listen_and_reflect";
+  // Add risk signals from analysis
+  if (turn.analysis.relationshipSignals.length > 0) {
+    for (const sig of turn.analysis.relationshipSignals) {
+      if (sig.confidence > 0.6) {
+        session.conversationState.riskSignals.push({
+          type: "emotional",
+          content: sig.content,
+          severity: sig.confidence > 0.8 ? "high" : "medium",
+          shouldNotifyCaregiver: sig.confidence > 0.7,
+        });
+      }
+    }
+  }
+
+  // 6. Enforce deterministic constraints
+  let nextStg = turn.next.stage as CallStage;
+
+  // Probe budget exhausted → no more probes, advance to closing
+  if (session.conversationState.probeBudget.totalRemaining <= 0) {
+    if (nextStg !== "closing" && nextStg !== "post_call_analysis") {
+      // Don't force closing immediately, but flag should close
+      session.conversationState.shouldCloseSoon = true;
+    }
+  }
+
+  // Should end call?
+  const isCallEnding = shouldEndCall(session.conversationState) || turn.next.isCallEnding;
+  if (isCallEnding && nextStg !== "closing" && nextStg !== "post_call_analysis") {
+    nextStg = "closing";
+    // P1-1: 不要用硬编码模板覆盖 LLM 生成的收尾。
+    // turn-planner 已经根据上下文生成自然的告别语，这里只做"如未生成才兜底"
+    if (!assistantReply || assistantReply.trim().length === 0) {
+      assistantReply = "好的，今天先聊到这里。您注意休息，有什么事随时跟家人说。我下次再给您打电话~";
+    }
+  }
+
+  // Listen and reflect check
+  if (session.conversationState.stage === "open_care_question" && shouldEnterListenAndReflect(elderInput)) {
+    nextStg = "listen_and_reflect";
     session.conversationState.stage = "listen_and_reflect";
   }
 
-  // Advance to next stage
-  const nextStg = nextStage(session.conversationState);
-  session.conversationState.completedStages.push(currentStage);
+  // Advance state
+  const currentStage = session.conversationState.stage;
+  if (turn.analysis.stageCompleted || nextStg !== currentStage) {
+    if (!session.conversationState.completedStages.includes(currentStage)) {
+      session.conversationState.completedStages.push(currentStage);
+    }
+  }
   session.conversationState.stage = nextStg;
   session.conversationState.turnCount += 1;
+  session.conversationState.lastAssistantUtterance = assistantReply;
 
-  // Check if call is ending
-  const isCallEnding = nextStg === "closing" || nextStg === "post_call_analysis";
-
-  // Generate next reply
-  const objectives = template
-    ? [
-        ...template.primaryObjectives.map((o) => o.content),
-        ...template.relationshipObjectives.map((o) => o.content),
-      ]
-    : [];
-  const context = composeRelationshipContext(session.elderId, session.caregiverId, objectives);
-
-  const reply = await generateConversationReply({
-    context,
-    callPlan: session.callPlan,
-    currentStage: nextStg,
-    transcript: session.transcript,
-    conversationState: session.conversationState,
-  });
-
-  // Safety check
-  const safeReply = sanitizeAssistantReply(reply.assistantReply);
-  const assistantReply = safeReply.sanitized;
-
-  // Add assistant reply to transcript
+  // 7. Append assistant reply to transcript
   session.transcript.push({
     speaker: "assistant",
     text: assistantReply,
@@ -233,21 +294,38 @@ export async function processTurn(
 
   // If closing, mark completed stages
   if (nextStg === "closing") {
-    session.conversationState.completedStages.push("closing");
+    if (!session.conversationState.completedStages.includes("closing")) {
+      session.conversationState.completedStages.push("closing");
+    }
     session.conversationState.stage = "post_call_analysis";
   }
 
-  // Persist
+  // 8. Persist session
   store.updateCallSession(sessionId, {
     transcript: session.transcript,
     conversationState: session.conversationState,
   });
 
+  // 9. Return enhanced response
   return {
     assistantReply,
     stage: nextStg,
     taskSlots: session.conversationState.taskSlots,
-    isCallEnding,
+    isCallEnding: isCallEnding || nextStg === "closing" || nextStg === "post_call_analysis",
+    probeBudget: session.conversationState.probeBudget,
+    emotion: {
+      label: turn.analysis.emotion.label,
+      confidence: turn.analysis.emotion.confidence,
+    },
+    relationshipSignals: turn.analysis.relationshipSignals.map((s) => ({
+      type: s.type,
+      content: s.content,
+    })),
+    statePatch: turn.statePatch as Record<string, unknown>,
+    safety: {
+      safe: safetyResult.safe,
+      repaired,
+    },
   };
 }
 
@@ -273,7 +351,7 @@ export async function finalizeCall(sessionId: string): Promise<{
 
   // Build summary
   const summary = session.transcript
-    .map((t) => `${t.speaker === "assistant" ? "小助理" : elder?.displayName ?? "长辈"}：${t.text}`)
+    .map((t) => `${t.speaker === "assistant" ? "念念" : elder?.displayName ?? "长辈"}：${t.text}`)
     .join("\n");
 
   session.endedAt = new Date().toISOString();
@@ -308,14 +386,27 @@ export async function finalizeCall(sessionId: string): Promise<{
     memoriesExtracted++;
   }
 
-  // Build task result
+  // Post-call extraction: get structured summary from full transcript
+  const postCallSummary = await extractPostCallSummary(
+    session.transcript,
+    template?.requiredSlots ?? []
+  );
+
+  // Build task result (combining TurnPlanner state + post-call extraction)
   const taskResult: TaskResult = {
-    status: session.conversationState.taskSlots.medication_taken ? "completed" : "partially_completed",
-    slots: session.conversationState.taskSlots,
-    riskSignals: session.conversationState.riskSignals,
-    messageToChild: (session.conversationState.relationshipSlots.message_to_child as string) ?? null,
-    confidence: 0.85,
-    needsReview: session.conversationState.riskSignals.length > 0,
+    status: postCallSummary.taskStatus === "completed" || session.conversationState.taskSlots.medication_taken
+      ? "completed"
+      : "partially_completed",
+    slots: { ...session.conversationState.taskSlots, ...postCallSummary.slots },
+    riskSignals: [
+      ...session.conversationState.riskSignals,
+      ...postCallSummary.riskSignals,
+    ],
+    messageToChild: (session.conversationState.relationshipSlots.message_to_child as string)
+      ?? postCallSummary.messageToChild
+      ?? null,
+    confidence: postCallSummary.confidence,
+    needsReview: postCallSummary.needsReview || session.conversationState.riskSignals.length > 0,
   };
 
   // Generate care insight
@@ -334,6 +425,7 @@ export async function finalizeCall(sessionId: string): Promise<{
     relationshipMemory: relProfile?.sharedMemories ?? [],
     elderDisplayName: elder?.displayName ?? "长辈",
     caregiverDisplayName: caregiver?.displayName ?? "家属",
+    transcript: session.transcript,  // P0-2: 传递完整通话记录让 insight 有依据
   });
 
   // Safety check on insight
