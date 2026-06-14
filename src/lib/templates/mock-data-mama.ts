@@ -28,7 +28,7 @@ export const mamaProfileTemplate: ElderProfileTemplate = {
     currentMedications: ["levothyroxine"],
     healthConcerns: ["blood_glucose", "thyroid_follow_up", "exercise", "weight"],
     healthAttitudes: [
-      { area: "blood glucose monitoring", attitude: "dislikes reminders about testing", willingness: "low" },
+      { area: "blood glucose monitoring", attitude: "dislikes reminders about testing", willingness: "reluctant" },
       { area: "exercise", attitude: "almost never exercises", willingness: "refuse" },
       { area: "thyroid medication", attitude: "takes levothyroxine regularly but dislikes being asked", willingness: "selective" },
       { area: "weight management", attitude: "overweight, direct comments cause resentment", willingness: "refuse" },
