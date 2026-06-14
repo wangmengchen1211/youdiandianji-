@@ -271,13 +271,15 @@ type Caregiver = {
 const STORAGE_KEY = "you-dian-dian-ji-demo";
 const MEM_DATA_VERSION = "v7_conversational_call";
 const IDENTITY_KEY = "memory_bridge_identity_v1";
+const LOGIN_FORM_KEY = "yddj_login_form_v1";
 const USERS_REGISTRY_KEY = "yddj_users_registry";
 const BINDING_REQUESTS_KEY = "yddj_binding_requests";
 
-// 根据手机号生成身份ID（取后4位 + 前缀）
+// 根据手机号生成唯一身份ID（后4位 + 4位随机后缀，避免重复）
 function generateUserId(phone: string): string {
   const digits = phone.replace(/\D/g, "").slice(-4);
-  return `YD-${digits || "0000"}`;
+  const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
+  return `YD-${digits || "0000"}-${rand}`;
 }
 
 // 用户注册表操作（模拟后端）
@@ -1169,7 +1171,6 @@ export default function HomePage() {
     callHistory: [],
   });
   const [callInput, setCallInput] = useState("");
-  const [schedulerResult, setSchedulerResult] = useState<string | null>(null);
 
   // TTS for elder side call
   const elderTTS = useSpeechSynthesis();
@@ -1396,10 +1397,28 @@ export default function HomePage() {
           const parsed = JSON.parse(saved) as Identity;
           if ((parsed.role === "child" || parsed.role === "elder") && parsed.personId) {
             next = parsed;
+            // 恢复登录表单字段
+            if (parsed.phone) setLoginPhone(parsed.phone);
+            if (parsed.displayName) setLoginName(parsed.displayName);
+            if (parsed.role) setLoginRole(parsed.role);
           }
         }
       } catch {
         // localStorage 解析失败忽略
+      }
+    }
+    // 2.5 恢复登录表单（即使 identity 不在，也从 LOGIN_FORM_KEY 恢复）
+    if (!next) {
+      try {
+        const formSaved = window.localStorage.getItem(LOGIN_FORM_KEY);
+        if (formSaved) {
+          const form = JSON.parse(formSaved) as { phone?: string; name?: string; role?: "child" | "elder" };
+          if (form.phone) setLoginPhone(form.phone);
+          if (form.name) setLoginName(form.name);
+          if (form.role) setLoginRole(form.role);
+        }
+      } catch {
+        // ignore
       }
     }
     if (next) {
@@ -1495,6 +1514,13 @@ export default function HomePage() {
     const next: Identity = { role, personId, phone, userId, displayName: name };
     setIdentity(next);
     setUserMode(role);
+
+    // 持久化登录表单字段（下次进入时预填）
+    try {
+      window.localStorage.setItem(LOGIN_FORM_KEY, JSON.stringify({ phone, name, role }));
+    } catch {
+      // ignore
+    }
 
     // 加载与此用户相关的绑定请求
     const allRequests = loadBindingRequests();
@@ -1633,6 +1659,7 @@ export default function HomePage() {
     setLoginStep("phone");
     if (typeof window !== "undefined") {
       try {
+        window.localStorage.removeItem(LOGIN_FORM_KEY);
         const url = new URL(window.location.href);
         url.searchParams.delete("role");
         url.searchParams.delete("personId");
@@ -2199,24 +2226,97 @@ export default function HomePage() {
       });
 
       // Auto-extract memory entries (Step 4)
+      // 覆盖 6 类语义化记忆：health / routine / preference / relationship / relay / emotional_signal
       const newMemories: MemoryEntry[] = [];
-      if (result && result.length > 0) {
-        newMemories.push({
-          id: uid("mem"),
-          category: "about_elder",
-          content: `${elderName}最近回复：${result}`,
-          source: `通话: ${task.title}`,
-          importance: "medium",
-          createdAt: nowLabel(),
-        });
+      if (result && result.trim().length > 0) {
+        const resultText = result.trim();
+        const isHealthContext = task.type === "medication" || task.type === "health_measurement";
+        const isRoutineContext = task.type === "bring_items" || task.type === "call_back";
+
+        // 1) health_memory → elder_health：健康相关关键词 或 健康类任务
+        if (
+          isHealthContext ||
+          /(血压|血糖|药|疼|不舒服|手术|医生|医院|指标|化验|检查|测|吃|喝|廗|手术|治療)/.test(resultText)
+        ) {
+          newMemories.push({
+            id: uid("mem"),
+            category: "elder_health",
+            content: `${elderName}健康相关：${resultText}`,
+            source: `通话: ${task.title}`,
+            importance: "high",
+            elderId: task.elderId,
+            createdAt: nowLabel(),
+          });
+        }
+
+        // 2) routine_memory → elder_habits：生活习惯 / 作息 / 物品传送
+        if (
+          isRoutineContext ||
+          /(每天|早上|晚上|中午|经常|很少|习惯|时间|几点|去|买|拿|带)/.test(resultText)
+        ) {
+          newMemories.push({
+            id: uid("mem"),
+            category: "elder_habits",
+            content: `${elderName}生活习惯：${resultText}`,
+            source: `通话: ${task.title}`,
+            importance: "medium",
+            elderId: task.elderId,
+            createdAt: nowLabel(),
+          });
+        }
+
+        // 3) preference_memory → chat_expression：沟通偏好 / 渠口偏好
+        if (
+          /(别提|不要说|不要|别问|别总|不喜欢|讨厌|太烦|感谢|谢谢|喜欢|爱好|乐意)/.test(resultText)
+        ) {
+          newMemories.push({
+            id: uid("mem"),
+            category: "chat_expression",
+            content: `${elderName}沟通偏好：${resultText}`,
+            source: `通话: ${task.title}`,
+            importance: "medium",
+            elderId: task.elderId,
+            createdAt: nowLabel(),
+          });
+        }
+
+        // 4) emotional_signal → pending_review：情绪信号需复看
+        if (
+          /(想|惦记|孤单|难过|不开心|失眠|担心|怕|累|烦|无聊|心情|高兴|开心|想念|挂念)/.test(resultText)
+        ) {
+          newMemories.push({
+            id: uid("mem"),
+            category: "pending_review",
+            content: `${elderName}情绪信号：${resultText}`,
+            source: `通话: ${task.title}`,
+            importance: "high",
+            elderId: task.elderId,
+            createdAt: nowLabel(),
+          });
+        }
+
+        // 5) about_elder 兑底：未匹配上任何语义分类时记录事实型记忆
+        if (newMemories.length === 0) {
+          newMemories.push({
+            id: uid("mem"),
+            category: "about_elder",
+            content: `${elderName}最近回复：${resultText}`,
+            source: `通话: ${task.title}`,
+            importance: "medium",
+            elderId: task.elderId,
+            createdAt: nowLabel(),
+          });
+        }
       }
+      // 6) relay_memory / relationship_memory → relationship：带话原话记录
       if (task.relayMessage) {
         newMemories.push({
           id: uid("mem"),
           category: "relationship",
           content: `你让念念给${elderName}带了句话：${task.relayMessage}`,
           source: `通话: ${task.title}`,
-          importance: "medium",
+          importance: "high",
+          elderId: task.elderId,
           createdAt: nowLabel(),
         });
       }
@@ -2251,22 +2351,37 @@ export default function HomePage() {
 
   function sendNote(version: NoteVersion) {
     const elderName = currentElder?.displayName ?? "长辈";
+    const caregiverName = identity?.displayName ?? "家人";
     addNotification({
       title: `已把小纸条发给${elderName}`,
       detail: version.text,
       level: "info",
     });
+    // 对发送方（子女）说：已经发出去了
     appendAssistantMessage({
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `小纸条已经帮你准备好啦~内容是：${version.text}`,
+      content: `小纸条已经发给${elderName}啦~下次TA打开页面就能看到哦。`,
+    });
+    // 对接收方（长辈）展示：标注来源 + 念念的理解
+    appendElderMessage({
+      id: uid("msg"),
+      role: "assistant",
+      kind: "text",
+      content: `这是${caregiverName}托我带给你的小纸条哦~`,
     });
     appendElderMessage({
       id: uid("msg"),
       role: "assistant",
       kind: "text",
       content: version.text,
+    });
+    appendElderMessage({
+      id: uid("msg"),
+      role: "assistant",
+      kind: "text",
+      content: `念念理解的是：${caregiverName}想让你知道TA惦记你呢。要是有什么想跟${caregiverName}说的，随时告诉我，我帮你转达~`,
     });
   }
 
@@ -2622,37 +2737,6 @@ export default function HomePage() {
   // 原因：startAgentCall/sendAgentTurn/finalizeAgentCall 走的是 call-orchestrator，
   // 与 elder-call-conversation 是两套互不相通的系统，导致「奶奶/妈妈」称呼错乱。
   // 统一保留 elder-call-conversation（openCall + callSession）作为唯一通话入口。
-
-  async function triggerSchedulerTick() {
-    setSchedulerResult("正在触发调度器...");
-    try {
-      const res = await fetch("/api/scheduler/tick", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: "{}",
-      });
-      const data = await res.json();
-      const triggered = data.triggered ?? [];
-      const skipped = data.skipped ?? [];
-      const lines: string[] = [];
-      if (triggered.length > 0) {
-        lines.push(`✅ 触发 ${triggered.length} 个通话:`);
-        triggered.forEach((t: { elderDisplayName: string; callSessionId: string }) => {
-          lines.push(`  - ${t.elderDisplayName} (session: ${t.callSessionId})`);
-        });
-      }
-      if (skipped.length > 0) {
-        lines.push(`⏭️ 跳过 ${skipped.length} 个:`);
-        skipped.forEach((s: { templateId: string; reason: string }) => {
-          lines.push(`  - ${s.templateId}: ${s.reason}`);
-        });
-      }
-      if (lines.length === 0) lines.push("没有触发任何任务。");
-      setSchedulerResult(lines.join("\n"));
-    } catch (err) {
-      setSchedulerResult(`调度失败: ${err instanceof Error ? err.message : "未知错误"}`);
-    }
-  }
 
   async function handleElderSubmit(text = elderInput) {
     const trimmed = text.trim();
@@ -4577,22 +4661,7 @@ export default function HomePage() {
 
         {activeTab === "tasks" && (
           <div className="space-y-3 pb-24">
-            {/* Scheduler toggle */}
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">任务</h2>
-              <button
-                type="button"
-                onClick={triggerSchedulerTick}
-                className="min-h-10 rounded-full bg-violet-100 px-4 py-2 text-xs font-medium text-violet-700"
-              >
-                调度器 Tick
-              </button>
-            </div>
-            {schedulerResult && (
-              <div className="rounded-2xl border border-violet-200 bg-violet-50 p-3 text-xs text-violet-800 whitespace-pre-wrap">
-                {schedulerResult}
-              </div>
-            )}
+            <h2 className="text-lg font-semibold">任务</h2>
 
             {/* Simple task cards */}
             {sortedTasks.map((task) => (
