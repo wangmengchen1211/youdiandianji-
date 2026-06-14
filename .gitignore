@@ -5,3 +5,7 @@ node_modules/
 tsconfig.tsbuildinfo
 .tmp_render_suffix.txt
 plan修改建议
+batch*.ps1
+master_scheduler.ps1
+scheduled_commits.log
+push.ps1

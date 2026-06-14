@@ -49,3 +49,14 @@ textarea {
 ::selection {
   background: rgba(242, 153, 110, 0.22);
 }
+
+@keyframes pulse {
+  from {
+    transform: scaleY(0.4);
+    opacity: 0.5;
+  }
+  to {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
