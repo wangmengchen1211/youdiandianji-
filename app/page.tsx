@@ -2324,7 +2324,15 @@ export default function HomePage() {
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "对话启动失败");
+      if (!res.ok) {
+        console.error("[elder-call] start API 返回非 200", {
+          status: res.status,
+          statusText: res.statusText,
+          errorBody: data,
+          elderId: callSession.elderId,
+        });
+        throw new Error(data.error ?? `对话启动失败 (HTTP ${res.status})`);
+      }
 
       const reply = data.reply?.trim() || `您好呀~我是小雨设置的小助理念念，小雨让我来跟您聊几句~`;
       const history = [{ role: "assistant" as const, text: reply }];
@@ -2340,8 +2348,12 @@ export default function HomePage() {
       }));
 
       setTimeout(() => playElderTurn(reply, data.shouldEndCall ?? false), 400);
-    } catch {
+    } catch (startError) {
       // 降级：用预设开场白
+      console.error("[elder-call] start API 请求失败", startError, {
+        elderId: callSession.elderId,
+        taskId: callSession.taskId,
+      });
       const elderName = currentElder?.displayName ?? "您";
       const fallback = `您好呀~我是小雨设置的小助理念念，小雨让我来跟您聊几句，您现在方便吗？`;
       const history = [{ role: "assistant" as const, text: fallback }];
