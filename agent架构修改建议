@@ -1,0 +1,464 @@
+这版已经**很稳了，可以作为 AI 执行重构的主计划**。  
+整体上已经解决了之前几个关键问题：
+
+- 有 Feature Flag，不会一次性切换。
+- 旧文件不直接删除。
+- Safety 前置。
+- HookService 和 HookWorkflow 职责拆开了。
+- `processTurn` 不同步跑 post-call。
+- `forceIntent` 不跳过 Situation Classification。
+- 实时通话不写长期记忆。
+
+我建议再补几处“小但关键”的东西。补完后，这份文档就可以直接交给 AI 编程助手执行。
+
+---
+
+## 1. 总评
+
+我会给这版：
+
+> **9 / 10，可以执行。**
+
+剩下的问题主要不是架构方向，而是**工程落地细节**：
+
+1. Feature Flag 优先级还需要定义。
+2. 缺少 LLM Provider / 结构化输出重试层。
+3. 缺少旧前端响应适配层。
+4. EventBus 写 Store 的接口没有具体定义。
+5. `CareInsightService` 在 Task 5 出现，但 Task 4 没列。
+6. Hook message 还需要保留 `trigger_event / why_now / message_goal`。
+7. Post-call 需要幂等，避免重复 finalize。
+8. Workflow 里要明确 safety policy 会注入 prompt，而不只是 postCheck。
+
+---
+
+# 建议补丁
+
+## 补丁 1：明确 Feature Flag 优先级
+
+你现在有：
+
+```text
+AGENT_V2_CHAT=true
+AGENT_V2_CALL=true
+AGENT_V2_HOOK=true
+AGENT_ARCH_VERSION=v1|v2
+```
+
+建议补充优先级，否则 AI 实现时可能混乱。
+
+建议加入：
+
+```md
+### Task 0.1.1：Feature Flag 优先级
+
+Feature Flag 判断规则：
+
+1. 如果 `AGENT_ARCH_VERSION=v2`，表示本地或测试环境全量开启 v2。
+2. 如果 `AGENT_ARCH_VERSION=v1` 或未设置，则按链路级开关判断：
+   - `AGENT_V2_CHAT=true` 开启聊天链路 v2
+   - `AGENT_V2_CALL=true` 开启通话链路 v2
+   - `AGENT_V2_HOOK=true` 开启 Hook 链路 v2
+3. 生产环境不建议直接使用 `AGENT_ARCH_VERSION=v2` 全量切换，优先使用链路级开关灰度。
+4. 任一 v2 workflow 抛错时，route 层必须 fallback 到 v1。
+```
+
+可以配一个工具函数：
+
+```ts
+export function isV2Enabled(chain: "chat" | "call" | "hook") {
+  if (process.env.AGENT_ARCH_VERSION === "v2") return true;
+
+  if (chain === "chat") return process.env.AGENT_V2_CHAT === "true";
+  if (chain === "call") return process.env.AGENT_V2_CALL === "true";
+  if (chain === "hook") return process.env.AGENT_V2_HOOK === "true";
+
+  return false;
+}
+```
+
+---
+
+## 补丁 2：新增 LLM Provider 层
+
+现在 Task 3 直接说创建 Cognitive Skills，但缺一个很关键的中间层：
+
+> 所有 LLM 调用必须统一走 LLM Provider，负责结构化输出、Zod 校验、重试、降级。
+
+建议加在 Task 4 或单独 Task 3.5。
+
+```md
+### Task 3.5：新增 LLM Provider
+
+新建：
+
+`src/lib/services/llm.service.ts`
+
+职责：
+
+1. 封装 DeepSeek 调用。
+2. 支持 Zod 结构化输出。
+3. 支持 JSON parse 失败后的 repair。
+4. 支持最多 1-2 次重试。
+5. 支持 fallback 输出。
+6. 记录 prompt、schema、raw output、parse error，方便 debug。
+
+接口示例：
+
+```ts
+async function generateStructured<T>({
+  prompt,
+  schema,
+  input,
+  fallback,
+  temperature = 0.2,
+}: {
+  prompt: string;
+  schema: ZodSchema<T>;
+  input: unknown;
+  fallback: T;
+  temperature?: number;
+}): Promise<T>
+```
+
+所有 Cognitive Skills 不直接调用 DeepSeek，必须调用 `llmService.generateStructured()`。
+```
+
+这个很重要，否则重构后最容易出问题的是：
+
+- LLM 输出不是合法 JSON；
+- schema parse 失败；
+- AI 生成自然语言混进 JSON；
+- 某个 workflow 直接崩。
+
+---
+
+## 补丁 3：新增 Response Adapter，保证旧前端不坏
+
+你写了：
+
+```text
+新 workflow 输出需适配旧前端响应格式（AgentResponse 结构不变）
+```
+
+建议明确新增一个文件。
+
+```md
+### Task 6.1：新增响应适配层
+
+新建：
+
+`src/lib/workflows/response-adapter.ts`
+
+职责：
+
+将 v2 `WorkflowResult` 转换为旧前端使用的 `AgentResponse`。
+
+示例：
+
+```ts
+function adaptWorkflowResultToAgentResponse(result: WorkflowResult): AgentResponse
+```
+
+要求：
+
+1. 旧前端字段保持不变。
+2. v2 新增字段可放入 `meta`。
+3. 如果 v2 workflow 抛错，返回 v1 fallback 结果。
+4. 不允许因为 v2 数据结构变化导致前端崩溃。
+```
+
+这可以显著降低接入风险。
+
+---
+
+## 补丁 4：EventBus 需要 EventStore 接口
+
+你现在写：
+
+```ts
+await eventStore.append(event);
+await eventBus.dispatch(event);
+```
+
+但文档里没有定义 `eventStore`。
+
+建议补充：
+
+```md
+### Task 4.3.1：Event Store
+
+MVP 阶段可基于 Memory Store 实现事件持久化。
+
+新增接口：
+
+```ts
+type EventStore = {
+  append(event: DomainEvent): Promise<void>;
+  listByType(type: DomainEvent["type"]): Promise<DomainEvent[]>;
+  listPending(): Promise<DomainEvent[]>;
+  markHandled(eventId: string, handlerName: string): Promise<void>;
+  markFailed(eventId: string, handlerName: string, error: string): Promise<void>;
+}
+```
+
+每个 DomainEvent 必须包含：
+
+```ts
+{
+  id: string;
+  type: string;
+  idempotencyKey: string;
+  payload: any;
+  createdAt: string;
+}
+```
+
+`idempotencyKey` 用于防止同一个通话结束事件重复生成 Hook 或重复写 insight。
+```
+
+---
+
+## 补丁 5：补上 CareInsightService
+
+Task 5 里有：
+
+```text
+CareInsightService.save
+```
+
+但 Task 4 没列这个 service。
+
+建议补充到 Task 4：
+
+```md
+- **`care-insight-service.ts`** — 新建或补齐：
+  - `save(insight)`
+  - `getRecentByCaregiver(caregiverId, limit)`
+  - `getByCallSession(callSessionId)`
+  - `markRead(insightId)`
+```
+
+否则 AI 可能会把 care insight 硬塞进 memory-service，后面不好维护。
+
+---
+
+## 补丁 6：Hook Schema 要保留触发上下文
+
+你现在 `hook.schema.ts` 是：
+
+```text
+message + reason + delivery_hint
+```
+
+但你的验收标准里要求：
+
+```text
+trigger_event + why_now + message_goal
+```
+
+建议 schema 明确加进去。
+
+```md
+### hook.schema.ts 补充字段
+
+HookMessagePlanner 输出：
+
+```ts
+{
+  message: string;
+  reason: string;
+  delivery_hint: "push" | "in_app" | "none";
+  trigger_event: string;
+  why_now: string;
+  message_goal: string;
+  cooldown_hours?: number;
+  risk_notes?: string[];
+}
+```
+
+注意：
+
+- `trigger_event` 来源于 DomainEvent。
+- `why_now` 解释为什么此刻出现。
+- `message_goal` 说明这条消息希望推动用户做什么。
+- `should_send` 仍然不由 LLM 决定。
+```
+
+这样主动消息就不会变成运营 push。
+
+---
+
+## 补丁 7：Post-call 必须幂等
+
+你已经说 `processTurn` 不同步跑 post-call，这很好。  
+但需要补一个关键点：
+
+> finalize 可能被调用多次。
+
+比如：
+
+- 前端调用 finalize；
+- call.ended event 触发 finalize；
+- scheduler retry 又触发 finalize。
+
+建议加：
+
+```md
+### Post-call 幂等要求
+
+`post-call.workflow.ts` 必须幂等。
+
+规则：
+
+1. 如果 `callSession.postCallStatus === "completed"`，直接返回已有结果。
+2. 如果 `postCallStatus === "processing"`，返回处理中状态。
+3. 只有 `postCallStatus === "pending" | "failed"` 才允许执行。
+4. 每个 call_session 只能生成一条主 CareInsight。
+5. 每个 call_session 的 memory_candidates 必须基于 source_id 去重。
+
+CallSession 增加字段：
+
+```ts
+postCallStatus: "pending" | "processing" | "completed" | "failed";
+postCallProcessedAt?: string;
+careInsightId?: string;
+```
+```
+
+这个一定要加，不然 post-call 重复写记忆会很麻烦。
+
+---
+
+## 补丁 8：Workflow 中要明确 Safety Policy 注入 Prompt
+
+目前 Task 5 写了：
+
+```text
+SafetyService.preCheck
+IntentSituationClassifier
+SafetyService.mergePolicy
+```
+
+但 deep-care / task / call-turn 里没有明确写：
+
+```text
+policyConstraint 注入 prompt
+```
+
+建议补一条通用要求：
+
+```md
+### Workflow 通用安全要求
+
+所有调用 Cognitive Skill 的 workflow，必须在调用前执行：
+
+```ts
+const constraints = safetyService.policyConstraint(finalSafetyPolicy);
+```
+
+并将以下字段传入 Cognitive Skill：
+
+```ts
+{
+  safety_policy: finalSafetyPolicy,
+  policy_constraints: constraints,
+  family_context: context
+}
+```
+
+禁止只在输出后做 `postCheck`。
+
+原因：
+- Safety 不只是修复输出，而是约束生成过程。
+- 涉及医疗、认知、用药、亲子冲突时，必须从生成前就限制模型。
+```
+
+---
+
+# 小的文字建议
+
+## 1. Task 0.2 回归测试样例最好写成“输入 / 期待 / 禁止”
+
+现在是描述式，建议改成更适合 AI 执行的格式。
+
+例如：
+
+```md
+### 深度关怀回归
+
+Input:
+“妈妈好像有一点老年痴呆。”
+
+Expected:
+- 不诊断；
+- 不说“她就是老年痴呆”；
+- 不直接跳任务；
+- 主动追问具体观察场景；
+- 输出中包含“先别急着下判断”或同等含义；
+- 创建 / 更新 possible_cognitive_decline care case。
+
+Forbidden:
+- “你妈妈应该是老年痴呆”
+- “听起来你很担心，我可以帮你提醒她”
+```
+
+这样 AI 测试更容易写。
+
+---
+
+## 2. Task 8 和 Task 10 很好，保留
+
+你现在把：
+
+```text
+Task 8：标记旧文件 deprecated
+Task 10：最终删除旧文件
+```
+
+拆开了，这是对的。  
+不要再改回一次性删除。
+
+---
+
+# 最终建议版总结
+
+这版只需要补下面 8 件事：
+
+```text
+1. Feature Flag 优先级
+2. LLM Provider / structured output retry
+3. Response Adapter
+4. EventStore 接口和 idempotencyKey
+5. CareInsightService
+6. Hook schema 增加 trigger_event / why_now / message_goal
+7. Post-call 幂等
+8. Workflow 调用 Cognitive Skill 前必须注入 safety constraints
+```
+
+补完后，这份计划就是一个很成熟的 MVP 重构实施文档。
+
+---
+
+# 最终评价
+
+我建议你把当前版本作为主文档，再加一个小节：
+
+```md
+## Task 11：工程稳定性补充
+```
+
+里面放：
+
+- LLM Provider
+- Response Adapter
+- EventStore
+- Post-call 幂等
+- Safety constraint 注入
+
+这样不会破坏你现在的结构，又能把工程风险补齐。
+
+一句话：
+
+> 这版已经不是“架构想法”，而是可以交给 AI 逐步执行的重构计划了。  
+> 只要补上 LLM 输出稳定性、事件幂等和响应兼容层，就可以开始动手。
