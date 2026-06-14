@@ -55,9 +55,9 @@ export async function generateCallPlan(
   if (context.pendingRelayMessages && context.pendingRelayMessages.length > 0) {
     const rawRelay = context.pendingRelayMessages[0]?.content ?? "";
     if (rawRelay.includes("忙") || rawRelay.includes("加班")) {
-      relayScript = `${context.caregiverProfile.displayName}最近确实比较忙，可能没顾上打电话。但TA特意让我来问问您，不是不惦记。`;
+      relayScript = `${context.caregiverProfile.displayName}最近确实比较忙，可能没顾上打电话。但她特意让我来问问您，不是不惦记。`;
     } else if (rawRelay.includes("想你") || rawRelay.includes("惦记")) {
-      relayScript = `${context.caregiverProfile.displayName}让我转告您，TA一直惦记着您。`;
+      relayScript = `${context.caregiverProfile.displayName}让我转告您，她一直惦记着您。`;
     } else {
       relayScript = `${context.caregiverProfile.displayName}特意让我转告您：${rawRelay}。`;
     }
@@ -70,7 +70,7 @@ export async function generateCallPlan(
     max_duration_seconds: 180,
     max_extra_questions: 2,
     stages: [
-      { stage: "identity_and_consent", goal: "说明身份并自然开场", sample_script: `${context.elderProfile.displayName}呀，您好呀~我是${context.caregiverProfile.displayName}设置的小助理念念，TA今天惦记您啦，让我来跟您聊几句~` },
+      { stage: "identity_and_consent", goal: "说明身份并自然开场", sample_script: `${context.elderProfile.displayName}呀，您好呀~我是${context.caregiverProfile.displayName}设置的小助理念念，她今天惦记您啦，让我来跟您聊几句~` },
       { stage: "warm_greeting", goal: "温暖问候，先聊聊日常", sample_script: "您今天过得怎么样呀？" },
       { stage: "child_update", goal: "自然转达近况和传话", sample_script: relayScript },
       { stage: "open_care_question", goal: "关心长辈状态（变化话题）", sample_script: careScript },

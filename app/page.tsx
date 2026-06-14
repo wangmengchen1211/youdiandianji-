@@ -495,6 +495,15 @@ function buildNicknames(relation: string, displayName: string) {
   return Array.from(new Set([displayName, relation, ...(defaults[relation] ?? [])]));
 }
 
+/** 根据长辈关系称谓返回对应性别的代词（他/她） */
+function elderPronoun(relation: string): "他" | "她" {
+  const female = ["妈妈", "奶奶", "外婆", "姥姥", "姑姑", "阿姨", "婶婶", "姐姐", "妹妹", "婆婆"];
+  const male = ["爸爸", "爷爷", "外公", "姥爷", "叔叔", "伯伯", "舅舅", "哥哥", "弟弟", "公公"];
+  if (female.includes(relation)) return "她";
+  if (male.includes(relation)) return "他";
+  return "她"; // 默认女性（照护对象多为女性长辈）
+}
+
 function detectTargetElders(text: string, elders: Elder[], currentElder: Elder | null) {
   const normalized = normalizeText(text);
   const directMatches = elders.filter((elder) =>
@@ -659,25 +668,25 @@ function buildCareReply(elderName: string) {
   return `${elderName}呀，不着急哦，您听到了回我一声就好啦~要是有啥想跟我说的，随时跟我说呀~`;
 }
 
-function rewriteRelayMessage(rawMessage: string, elderName: string, childName?: string): string {
+function rewriteRelayMessage(rawMessage: string, elderName: string, childName?: string, childPronoun: "他" | "她" = "她"): string {
   const cleaned = rawMessage.trim();
   const name = childName ?? "孩子";
 
   // Common patterns
   if (cleaned.includes("忙") && (cleaned.includes("没空") || cleaned.includes("没时间"))) {
-    return `${name}这两天确实忙，可能没顾上打电话。但TA特意让我来问问您，不是不惦记。`;
+    return `${name}这两天确实忙，可能没顾上打电话。但${childPronoun}特意让我来问问您，不是不惦记。`;
   }
   if (cleaned.includes("加班")) {
-    return `${name}最近加班比较多，可能没顾上联系您。但TA心里一直惦记着，特意让我来问候一声。`;
+    return `${name}最近加班比较多，可能没顾上联系您。但${childPronoun}心里一直惦记着，特意让我来问候一声。`;
   }
   if (cleaned.includes("不是不想")) {
     return `${name}让我跟您说，最近确实比较忙，不是不想您，您别多想。`;
   }
   if (cleaned.includes("想你") || cleaned.includes("惦记")) {
-    return `${name}让我转告您，TA一直惦记着您，就是最近有点忙不过来。`;
+    return `${name}让我转告您，${childPronoun}一直惦记着您，就是最近有点忙不过来。`;
   }
   // Default: wrap with warmth
-  return `${name}特意让我转告您：${cleaned}。TA虽然没亲自打电话，但心里一直记挂您。`;
+  return `${name}特意让我转告您：${cleaned}。${childPronoun}虽然没亲自打电话，但心里一直记挂您。`;
 }
 
 type CareTopic = "health" | "daily_life" | "weather" | "food" | "mood" | "family_update";
@@ -1973,8 +1982,9 @@ export default function HomePage() {
     // Timeout: elder didn't pick up → suggest calling personally
     if (timeoutTasks.length > 0) {
       const t = timeoutTasks[0];
+      const tp = elderPronoun(elders.find(e => e.id === t.elderId)?.relation ?? "");
       suggestions.push({
-        text: `今天给${t.elderDisplayName}打了电话，TA没接到。要是你方便的话，直接给TA回一个会更放心。`,
+        text: `今天给${t.elderDisplayName}打了电话，${tp}没接到。要是你方便的话，直接给${tp}回一个会更放心。`,
         action: "打电话",
         elderId: t.elderId,
       });
@@ -1983,8 +1993,9 @@ export default function HomePage() {
     // Waiting for confirmation → reassure, no action needed
     if (unconfirmedTasks.length > 0 && timeoutTasks.length === 0) {
       const t = unconfirmedTasks[0];
+      const tp = elderPronoun(elders.find(e => e.id === t.elderId)?.relation ?? "");
       suggestions.push({
-        text: `已经提醒了${t.elderDisplayName}，正在等TA回复。你先忙你的，有消息我第一时间告诉你。`,
+        text: `已经提醒了${t.elderDisplayName}，正在等${tp}回复。你先忙你的，有消息我第一时间告诉你。`,
       });
     }
 
@@ -2006,7 +2017,7 @@ export default function HomePage() {
       const recentResponse = elder.recentResponseAt;
       if (!recentResponse || recentResponse.includes("暂未") || recentResponse.includes("未")) {
         suggestions.push({
-          text: `这几天还没和${elder.displayName}聊过。如果你今天有 3 分钟，可以给TA回个电话，不用聊很久。`,
+          text: `这几天还没和${elder.displayName}聊过。如果你今天有 3 分钟，可以给${elderPronoun(elder.relation)}回个电话，不用聊很久。`,
           action: "打电话",
           elderId: elder.id,
         });
@@ -2272,7 +2283,7 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `${elder.displayName}加入啦~以后没有特别说明的话，我会先帮你照看TA哦。放心交给我吧~`,
+      content: `${elder.displayName}加入啦~以后没有特别说明的话，我会先帮你照看${elderPronoun(elder.relation)}哦。放心交给我吧~`,
     });
     appendElderMessage({
       id: uid("msg"),
@@ -2365,7 +2376,7 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `帮你排好啦~到了${draft.remindLabel}，我会先联系${draft.elderDisplayName}的。${draft.relayMessage ? `你说的那句"${draft.relayMessage}"，我也帮你转告给TA呀~` : "你放心交给我吧~"}`,
+      content: `帮你排好啦~到了${draft.remindLabel}，我会先联系${draft.elderDisplayName}的。${draft.relayMessage ? `你说的那句"${draft.relayMessage}"，我也帮你转告给${elderPronoun(elders.find(e => e.id === draft.elderId)?.relation ?? "")}呀~` : "你放心交给我吧~"}`,
     });
 
     // ── 检查长辈是否已注册绑定ID，未绑定时提醒无法触达 ──────────────
@@ -2385,7 +2396,7 @@ export default function HomePage() {
           id: uid("msg"),
           role: "assistant",
           kind: "text",
-          content: `对了，提醒你一下~${draft.elderDisplayName}好像还没有在系统里注册绑定ID呢。到了提醒时间，我可能没办法自动打电话联系TA。要是有TA的联系方式，你亲自提醒一下会更稳妥哦。等TA注册绑定好了，我就能帮你自动触达啦~`,
+          content: `对了，提醒你一下~${draft.elderDisplayName}好像还没有在系统里注册绑定ID呢。到了提醒时间，我可能没办法自动打电话联系${elderPronoun(targetElder?.relation ?? "")}。要是有${elderPronoun(targetElder?.relation ?? "")}的联系方式，你亲自提醒一下会更稳妥哦。等${elderPronoun(targetElder?.relation ?? "")}注册绑定好了，我就能帮你自动触达啦~`,
         });
       } else if (identity?.userId && elderAccount.boundPartnerId !== identity.userId) {
         addNotification({
@@ -2397,7 +2408,7 @@ export default function HomePage() {
           id: uid("msg"),
           role: "assistant",
           kind: "text",
-          content: `小提示~${draft.elderDisplayName}注册过了，但好像还没跟你绑定呢。你可以在「我的」页面发起绑定请求，等TA通过后我就能帮你自动联系啦~`,
+          content: `小提示~${draft.elderDisplayName}注册过了，但好像还没跟你绑定呢。你可以在「我的」页面发起绑定请求，等${elderPronoun(targetElder?.relation ?? "")}通过后我就能帮你自动联系啦~`,
         });
       }
     }
@@ -2439,7 +2450,7 @@ export default function HomePage() {
     if (status === "reached") {
       addNotification({
         title: `${task.elderDisplayName}已接到提醒`,
-        detail: `${task.title}已经触达啦，接下来等TA确认就好~`,
+        detail: `${task.title}已经触达啦，接下来等${elderPronoun(elders.find(e => e.id === task.elderId)?.relation ?? "")}确认就好~`,
         level: "info",
       });
     }
@@ -2451,6 +2462,7 @@ export default function HomePage() {
     if (status === "confirmed" || status === "completed") {
       const elder = elders.find((e) => e.id === task.elderId);
       const elderName = task.elderDisplayName;
+      const ep = elderPronoun(elder?.relation ?? "");
       const hasRealResult = Boolean(result && result.trim() && result.trim() !== "电话已确认" && result.trim() !== "电话回访确认已完成");
 
       // factualParts：仅“接通了电话” 或 “<长辈原话>” 二选一，不抷测
@@ -2461,12 +2473,12 @@ export default function HomePage() {
         factualParts.push(`${elderName}接通了电话`);
       }
       if (task.relayMessage) {
-        factualParts.push(`你托我传的那句话（${task.relayMessage}），我转告给TA了`);
+        factualParts.push(`你托我传的那句话（${task.relayMessage}），我转告给${ep}了`);
       }
 
       // relationshipInsight：只描述“接了电话”这个事实，不写死“语气是开心的”
       const relationshipInsight = hasRealResult
-        ? `${elderName}跟念念说了几句~要看TA原话可以点上面的总结哈~`
+        ? `${elderName}跟念念说了几句~要看${ep}原话可以点上面的总结哈~`
         : `${elderName}这会儿接通了电话，但没说太多话~要是你想知道具体什么情况，可以再打一个~`;
 
       // suggestedAction：health_measurement + 真实有 capturedValue 才说“指标”，
@@ -2474,11 +2486,11 @@ export default function HomePage() {
       const looksLikeNumber = hasRealResult && /[\d.]/.test(result!);
       const suggestedAction = task.type === "health_measurement"
         ? (looksLikeNumber
-            ? `${elderName}的指标是 ${result!.trim()}，你记一下~这两天要是有空跟TA聊聊~`
-            : `${elderName}接了电话，但念念还没听清TA说做了没~你可以过会儿再问问~`)
+            ? `${elderName}的指标是 ${result!.trim()}，你记一下~这两天要是有空跟${ep}聊聊~`
+            : `${elderName}接了电话，但念念还没听清${ep}说做了没~你可以过会儿再问问~`)
         : task.type === "medication"
-          ? `${elderName}接了电话，念念已经把这件事告诉他了~你这几天要是想问一眼，随时联系TA~`
-          : `${elderName}接到了你的惦记~要是今晚有几分钟的话，给TA回个电话吧~`;
+          ? `${elderName}接了电话，念念已经把这件事告诉${ep}了~你这几天要是想问一眼，随时联系${ep}~`
+          : `${elderName}接到了你的惦记~要是今晚有几分钟的话，给${ep}回个电话吧~`;
 
       const suggestedMessage = `听说你挺好的，我就放心啦~最近有点忙，但一直惦记着你呢~`;
 
@@ -2497,7 +2509,7 @@ export default function HomePage() {
       setCallInsights((prev) => [insight, ...prev].slice(0, 20));
 
       // Send warm receipt to child
-      const warmReceipt = `${elderName}刚刚接了电话啦~${factualParts.length > 0 ? `TA说：${factualParts.join("，")}。` : ""}${relationshipInsight} ${suggestedAction}`;
+      const warmReceipt = `${elderName}刚刚接了电话啦~${factualParts.length > 0 ? `${ep}说：${factualParts.join("，")}。` : ""}${relationshipInsight} ${suggestedAction}`;
 
       addNotification({
         title: `${elderName}刚刚回复了`,
@@ -2582,7 +2594,7 @@ export default function HomePage() {
         id: uid("msg"),
         role: "assistant",
         kind: "text",
-        content: `${task.elderDisplayName}两次都没接到电话呢，可能在忙吧~你要是方便的话，直接给TA打个电话会更好哦~`,
+        content: `${task.elderDisplayName}两次都没接到电话呢，可能在忙吧~你要是方便的话，直接给${elderPronoun(elders.find(e => e.id === task.elderId)?.relation ?? "")}打个电话会更好哦~`,
       });
     }
   }
@@ -2600,7 +2612,7 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `小纸条已经发给${elderName}啦~下次TA打开页面就能看到哦。`,
+      content: `小纸条已经发给${elderName}啦~下次${elderPronoun(currentElder?.relation ?? "")}打开页面就能看到哦。`,
     });
     // 对接收方（长辈）展示：标注来源 + 念念的理解
     appendElderMessage({
@@ -2619,7 +2631,7 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `念念理解的是：${caregiverName}想让你知道TA惦记你呢。要是有什么想跟${caregiverName}说的，随时告诉我，我帮你转达~`,
+      content: `念念理解的是：${caregiverName}想让你知道她惦记你呢。要是有什么想跟${caregiverName}说的，随时告诉我，我帮你转达~`,
     });
   }
 
@@ -2893,7 +2905,7 @@ export default function HomePage() {
         }
         // 2) 健康异常 → 升级提示
         if (data.healthAlert || captured?.status === "health_abnormal") {
-          lines.push(`⚠️ TA提了健康相关情况，建议你尽快联系一下。`);
+          lines.push(`⚠️ ${elderPronoun(currentElder?.relation ?? "")}提了健康相关情况，建议你尽快联系一下。`);
         }
         // 3) 任务状态
         if (captured?.status === "done") {
@@ -3069,7 +3081,7 @@ export default function HomePage() {
         id: uid("msg"),
         role: "assistant",
         kind: "text",
-        content: `没问题呀~我已经把"添加长辈"的表单打开啦。你补一下${hintedRelation}的联系方式，我就能开始帮你记挂TA啦~`,
+        content: `没问题呀~我已经把"添加长辈"的表单打开啦。你补一下${hintedRelation}的联系方式，我就能开始帮你记挂${elderPronoun(hintedRelation)}啦~`,
       });
       return;
     }
@@ -3178,7 +3190,7 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `好呀~${remindLabel}给${targets[0].displayName}打电话。要不要顺便帮你带句话呢？比如告诉TA你最近有点忙，但一直惦记着TA哦~`,
+      content: `好呀~${remindLabel}给${targets[0].displayName}打电话。要不要顺便帮你带句话呢？比如告诉${elderPronoun(targets[0].relation)}你最近有点忙，但一直惦记着${elderPronoun(targets[0].relation)}哦~`,
     });
   }
 
@@ -3229,7 +3241,7 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `好呀~${parsedTime}给${flow.targets[0].displayName}打电话。要不要顺便帮你带句话呢？比如告诉TA你最近有点忙，但一直惦记着TA哦~`,
+      content: `好呀~${parsedTime}给${flow.targets[0].displayName}打电话。要不要顺便帮你带句话呢？比如告诉${elderPronoun(flow.targets[0].relation)}你最近有点忙，但一直惦记着${elderPronoun(flow.targets[0].relation)}哦~`,
     });
   }
 
@@ -4403,8 +4415,8 @@ export default function HomePage() {
               <p className="mt-2 text-xl font-semibold text-stone-800">{currentElder?.displayName ?? "长辈"}</p>
               <p className="mt-2 text-sm leading-6 text-stone-500">
                 {callSession.phase === "dialing" && "正在拨打电话，请稍等..."}
-                {(callSession.phase === "connected" || callSession.phase === "speaking") && "念念正在和TA聊天..."}
-                {callSession.phase === "listening" && "TA正在回应念念..."}
+                {(callSession.phase === "connected" || callSession.phase === "speaking") && `念念正在和${elderPronoun(currentElder?.relation ?? "")}聊天...`}
+                {callSession.phase === "listening" && `${elderPronoun(currentElder?.relation ?? "")}正在回应念念...`}
                 {callSession.phase === "missed" && "暂时没人接听，稍后会再试一次"}
                 {callSession.phase === "ended" && `${currentCallTask?.title ?? "问候"}已完成`}
               </p>
