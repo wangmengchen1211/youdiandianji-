@@ -169,8 +169,8 @@ export function VoiceCallModal({
 
     tts.speak({
       text,
-      // T0 修复：强制服务端 TTS，避免浏览器合成机械、生硬
-      forceServer: true,
+      // Vercel 环境下 MiniMax 代理不可达，允许回退浏览器 TTS
+      forceServer: false,
       onProviderDetected: (ttsProvider) => {
         // T0 修复：记录 provider 供调试 + 让上层排查「是否真的走了服务端」
         console.log("[voice_call_turn]", {

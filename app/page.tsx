@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, startTransition } from "react";
 import { useSpeechSynthesis } from "./components/hooks/useSpeechSynthesis";
 import {
   MAIN_TAB_BY_CATEGORY,
@@ -1190,10 +1190,7 @@ export default function HomePage() {
 
   // 导入记忆 - 模态框打开时探活 OCR 服务
   useEffect(() => {
-    if (!showImportModal) {
-      setOcrAvailable(null);
-      return;
-    }
+    if (!showImportModal) return;
     let cancelled = false;
     (async () => {
       try {
@@ -1224,6 +1221,7 @@ export default function HomePage() {
     setImportRawText("");
     setImportFileMeta(null);
     setImportCandidateTab("family_info");
+    setOcrAvailable(null);
     setImportManualMode(false);
     setEditingCandidateId(null);
     setEditingCandidateText("");
@@ -1335,41 +1333,43 @@ export default function HomePage() {
     const storedDataVer = window.localStorage.getItem(STORAGE_KEY + "_ver");
     const needsFullReset = storedDataVer !== MEM_DATA_VERSION;
 
-    if (needsFullReset) {
-      // ── 版本不匹配：强制重置整个数据集为最新 buildDemoState ──
-      const demo = buildDemoState();
-      setUserMode(demo.userMode);
-      setElders(demo.elders);
-      setTasks(demo.tasks);
-      setNotifications(demo.notifications);
-      setMessages(demo.messages.map(stampMessage));
-      setElderMessages(demo.elderMessages.map(stampMessage));
-      setCurrentElderId(demo.currentElderId);
-      setAssistantProfile(demo.assistantProfile);
-      setAssistantMemories(demo.assistantMemories ?? []);
-      setMemoryEntries(demo.memoryEntries);
-      setCallInsights(demo.callInsights ?? []);
-      window.localStorage.setItem(STORAGE_KEY + "_ver", MEM_DATA_VERSION);
-    } else {
-      const saved = window.localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved) as StoredState;
-        setUserMode(parsed.userMode ?? null);
-        setElders(parsed.elders);
-        setTasks(parsed.tasks);
-        setNotifications(parsed.notifications);
-        setMessages((parsed.messages ?? []).map(stampMessage));
-        setElderMessages((parsed.elderMessages ?? []).map(stampMessage));
-        setCurrentElderId(parsed.currentElderId);
-        setAssistantProfile(parsed.assistantProfile ?? DEFAULT_ASSISTANT_PROFILE);
-        setAssistantMemories(parsed.assistantMemories ?? []);
-        if (parsed.memoryEntries && parsed.memoryEntries.length > 0) {
-          setMemoryEntries(parsed.memoryEntries);
+    startTransition(() => {
+      if (needsFullReset) {
+        // ── 版本不匹配：强制重置整个数据集为最新 buildDemoState ──
+        const demo = buildDemoState();
+        setUserMode(demo.userMode);
+        setElders(demo.elders);
+        setTasks(demo.tasks);
+        setNotifications(demo.notifications);
+        setMessages(demo.messages.map(stampMessage));
+        setElderMessages(demo.elderMessages.map(stampMessage));
+        setCurrentElderId(demo.currentElderId);
+        setAssistantProfile(demo.assistantProfile);
+        setAssistantMemories(demo.assistantMemories ?? []);
+        setMemoryEntries(demo.memoryEntries);
+        setCallInsights(demo.callInsights ?? []);
+        window.localStorage.setItem(STORAGE_KEY + "_ver", MEM_DATA_VERSION);
+      } else {
+        const saved = window.localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          const parsed = JSON.parse(saved) as StoredState;
+          setUserMode(parsed.userMode ?? null);
+          setElders(parsed.elders);
+          setTasks(parsed.tasks);
+          setNotifications(parsed.notifications);
+          setMessages((parsed.messages ?? []).map(stampMessage));
+          setElderMessages((parsed.elderMessages ?? []).map(stampMessage));
+          setCurrentElderId(parsed.currentElderId);
+          setAssistantProfile(parsed.assistantProfile ?? DEFAULT_ASSISTANT_PROFILE);
+          setAssistantMemories(parsed.assistantMemories ?? []);
+          if (parsed.memoryEntries && parsed.memoryEntries.length > 0) {
+            setMemoryEntries(parsed.memoryEntries);
+          }
+          if (parsed.callInsights) setCallInsights(parsed.callInsights);
         }
-        if (parsed.callInsights) setCallInsights(parsed.callInsights);
       }
-    }
-    setHydrated(true);
+      setHydrated(true);
+    });
   }, []);
 
   // ─── 身份锁定加载（优先级：URL 参数 > localStorage IDENTITY_KEY）─────────────────────────────────────
@@ -1403,24 +1403,28 @@ export default function HomePage() {
       }
     }
     if (next) {
-      setIdentity(next);
-      setUserMode(next.role);
-      if (next.role === "elder") {
-        setCurrentElderId(next.personId);
-      }
-      // 加载用户账号信息和绑定请求
-      if (next.userId) {
-        const registry = loadUsersRegistry();
-        const account = registry[next.userId];
-        if (account) setMyAccount(account);
-        const allRequests = loadBindingRequests();
-        setBindingRequests(allRequests.filter(
-          (r) => r.toUserId === next.userId || r.fromUserId === next.userId,
-        ));
-      }
+      startTransition(() => {
+        setIdentity(next!);
+        setUserMode(next!.role);
+        if (next!.role === "elder") {
+          setCurrentElderId(next!.personId);
+        }
+        // 加载用户账号信息和绑定请求
+        if (next!.userId) {
+          const registry = loadUsersRegistry();
+          const account = registry[next!.userId];
+          if (account) setMyAccount(account);
+          const allRequests = loadBindingRequests();
+          setBindingRequests(allRequests.filter(
+            (r) => r.toUserId === next!.userId || r.fromUserId === next!.userId,
+          ));
+        }
+      });
     } else {
       // 没有身份 → 强制走登录页，避免被 demo.userMode 默认 "child" 覆盖
-      setUserMode(null);
+      startTransition(() => {
+        setUserMode(null);
+      });
     }
   }, []);
 
@@ -1777,9 +1781,11 @@ export default function HomePage() {
     if (todayChildMessages.length === 0 && todayElderMessages.length === 0) return;
 
     const nextMemory = buildAssistantMemory(dayKey, todayChildMessages, todayElderMessages, currentElder);
-    setAssistantMemories((prev) => {
-      const merged = [...prev.filter((item) => item.dayKey !== dayKey), nextMemory];
-      return merged.sort((a, b) => a.dayKey.localeCompare(b.dayKey)).slice(-14);
+    startTransition(() => {
+      setAssistantMemories((prev) => {
+        const merged = [...prev.filter((item) => item.dayKey !== dayKey), nextMemory];
+        return merged.sort((a, b) => a.dayKey.localeCompare(b.dayKey)).slice(-14);
+      });
     });
   }, [hydrated, messages, elderMessages, currentElder]);
 
@@ -2359,7 +2365,7 @@ export default function HomePage() {
       rate: 0.9,
       pitch: 1.05,
       volume: 0.85,
-      forceServer: true,
+      forceServer: false, // Vercel 环境下 MiniMax 代理不可达，允许回退浏览器 TTS
       onProviderDetected: (ttsProvider) => {
         console.log("[elder_call_turn]", {
           phase: "tts",
@@ -2381,8 +2387,15 @@ export default function HomePage() {
         }
       },
       onError: (err) => {
-        // T0 修复：服务端 TTS 不可用时 console 报错，不静默 fallback
         console.error("[elder_call_turn] TTS 失败：", err);
+        // TTS 失败也要推进 UI，否则卡在 loading 阶段
+        if (isCallEnding) {
+          setTimeout(() => {
+            setCallSession((p) => ({ ...p, phase: "ended" }));
+          }, 800);
+        } else {
+          setCallSession((prev) => ({ ...prev, phase: "listening" }));
+        }
       },
     });
   }
@@ -2463,8 +2476,16 @@ export default function HomePage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "回复失败");
 
-      const reply = data.reply?.trim() || "嗯嗯，我都记下来啦~";
+      const reply = data.reply?.trim() || `嗯嗯，${currentElder?.displayName ?? "妈"}说的我都听着呢~`;
       const newHistory = [...history, { role: "assistant" as const, text: reply }];
+
+      // 诊断：LLM 未生效时在前端 console 提醒（不影响用户体验，仅帮助开发者排查）
+      if (data.llmUsed === false) {
+        console.warn("[elder-call] 本轮回复使用兑底模板（LLM 未生效），请检查 DEEPSEEK_API_KEY 配置", {
+          stage: data.stage,
+          intent: data.intent,
+        });
+      }
 
       // 根据服务端返回的 capturedTaskStatus 更新任务状态
       // T0 修复：not_done / postponed 不能再标为 "confirmed"（那会写入"知道了收到了"幻觉 + "语气是开心的"）
@@ -2536,10 +2557,14 @@ export default function HomePage() {
       }));
 
       setTimeout(() => playElderTurn(reply, data.shouldEndCall ?? false), 300);
-    } catch {
+    } catch (fetchError) {
       // 降级：简单回应（T0 修复：不抦断通话、不说"不打扰您"，温和继续）
+      console.error("[elder-call] 对话 API 请求失败", fetchError);
       const elderName = currentElder?.displayName ?? "妈";
-      const fallback = `嗯嗯${elderName}，我记下来啦~${elderName}继续跟我说呗~`;
+      // 兑底也要体现"在听"：把长辈的原话 echo 回去
+      const fallback = responseText.trim()
+        ? `嗯嗯，${elderName}说的"${responseText.trim().slice(0, 20)}"我听到啦~${elderName}继续说~`
+        : `嗯嗯${elderName}，我听着呢~${elderName}继续说~`;
       const newHistory = [...history, { role: "assistant" as const, text: fallback }];
       setCallSession((prev) => ({
         ...prev,

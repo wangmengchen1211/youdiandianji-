@@ -204,9 +204,13 @@ export function useSpeechSynthesis(): UseSpeechSynthesisReturn {
     }
   }
 
-  /** 尝试使用服务端 TTS API 生成音频 */
+  /** 尝试使用服务端 TTS API 生成音频（带 5 秒超时保护） */
   async function tryServerTTS(options: SpeakOptions): Promise<boolean> {
     try {
+      // 超时保护：5 秒内无响应则放弃服务端 TTS，快速回退浏览器
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000);
+
       const res = await fetch("/api/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -217,7 +221,10 @@ export function useSpeechSynthesis(): UseSpeechSynthesisReturn {
           pitch: options.pitch ?? 1.05,
           forceServer: options.forceServer === true,
         }),
+        signal: controller.signal,
       });
+
+      clearTimeout(timeoutId);
 
       if (!res.ok) {
         // T0 修复：503 且 forceServer=true → 不静默 fallback，让上层感知错误
