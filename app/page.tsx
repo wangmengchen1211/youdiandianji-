@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { VoiceCallModal } from "./components/VoiceCallModal";
 
 type TabKey = "home" | "tasks" | "notifications" | "profile" | "assistant";
 type MessageKind = "text" | "taskDraft" | "note" | "summary";
@@ -35,6 +36,22 @@ type Elder = {
   responseHabit: string;
   nicknames: string[];
   recentResponseAt?: string;
+  oneLinePortrait?: string;
+  healthFocus?: string[];
+  recentSignals?: string[];
+  personalityTraits?: string[];
+  relationshipMemories?: string[];
+};
+
+type MemoryCategory = "about_user" | "about_elder" | "relationship" | "communication_style" | "pending_review";
+
+type MemoryEntry = {
+  id: string;
+  category: MemoryCategory;
+  content: string;
+  source?: string;
+  importance?: "high" | "medium" | "low";
+  createdAt: string;
 };
 
 type TaskLog = {
@@ -57,6 +74,7 @@ type Task = {
   needResult: boolean;
   status: TaskStatus;
   result?: string;
+  relayMessage?: string;
   createdAt: string;
   updatedAt: string;
   logs: TaskLog[];
@@ -76,6 +94,20 @@ type TaskDraft = {
   needResult: boolean;
   priority: string;
   created: boolean;
+  relayMessage?: string;
+};
+
+type TaskCreateStep = "idle" | "awaiting_time" | "awaiting_relay";
+
+type TaskCreateFlow = {
+  step: TaskCreateStep;
+  rawText: string;
+  targets: Elder[];
+  taskType: TaskType;
+  remindLabel: string;
+  repeatRule: string;
+  relayMessage: string;
+  recommendedSlots: string[];
 };
 
 type NoteVersion = {
@@ -156,6 +188,18 @@ type AgentCareInsight = {
   suggestedMessage: string;
 };
 
+type CallInsight = {
+  id: string;
+  taskId: string;
+  elderId: string;
+  elderDisplayName: string;
+  factualSummary: string;
+  relationshipInsight: string;
+  suggestedAction: string;
+  suggestedMessage: string;
+  createdAt: string;
+};
+
 type AgentCallState = {
   active: boolean;
   sessionId: string | null;
@@ -178,6 +222,8 @@ type StoredState = {
   currentElderId: string | null;
   assistantProfile: AssistantProfile;
   assistantMemories: AssistantMemory[];
+  memoryEntries: MemoryEntry[];
+  callInsights: CallInsight[];
 };
 
 const STORAGE_KEY = "you-dian-dian-ji-demo";
@@ -191,10 +237,10 @@ const RELATION_OPTIONS = ["妈妈", "爸爸", "奶奶", "爷爷", "外婆", "外
 const FOCUS_OPTIONS = ["吃药", "测血糖", "复诊", "带物", "饮食", "回电"];
 const COMMUNICATION_OPTIONS = ["温柔一点", "简短一点", "直接一点", "不要太肉麻"];
 const QUICK_INPUTS = [
-  "明早 8 点提醒爸爸测血糖，测完告诉我。",
-  "今晚 8 点提醒妈妈吃降压药。",
-  "把“你怎么又忘吃药了”说得温柔点。",
-  "今天奶奶的任务完成了吗？",
+  "帮我每天提醒妈妈吃降压药",
+  "明早提醒爸爸测血糖",
+  "帮我把一句重话改得温柔点",
+  "妈妈最近怎么样了",
 ];
 
 const ELDER_QUICK_INPUTS = ["我已经吃药了", "电话里没听清，再说一遍", "今天我都做完了", "帮我告诉孩子我挺好的"];
@@ -369,11 +415,36 @@ function parseRemindLabel(text: string) {
 }
 
 function buildTaskContent(text: string, type: TaskType, elderName: string) {
-  if (type === "medication") return `提醒${elderName}吃药，听到后说一声“知道了”。`;
+  if (type === "medication") return `提醒${elderName}吃药，听到后说一声"知道了"。`;
   if (type === "health_measurement") return `提醒${elderName}测量并回传结果。`;
   if (type === "bring_items") return text.replace(/提醒/g, "").replace(elderName, elderName).replace(/[。！]/g, "");
   if (type === "call_back") return `提醒${elderName}给家属回个电话。`;
   return text.replace(/[。！]/g, "");
+}
+
+function recommendTimeSlots(elder: Elder): string[] {
+  const slots: string[] = [];
+  const avail = elder.availableTime ?? "08:00-21:00";
+  // If elder has specific preferences, prioritize them
+  if (avail.includes("20") || avail.includes("21") || avail.includes("晚上")) {
+    slots.push("晚饭后 20:00");
+  } else {
+    slots.push("晚饭后 19:30");
+  }
+  if (avail.includes("08") || avail.includes("早")) {
+    slots.push("早饭后 08:00");
+  } else {
+    slots.push("上午 09:30");
+  }
+  if (avail.includes("12") || avail.includes("中午")) {
+    slots.push("午饭后 12:30");
+  }
+  return slots;
+}
+
+function formatRelayForDraft(rawRelay: string, elderName: string): string {
+  const cleaned = rawRelay.trim().replace(/^就说我/, "").replace(/^告诉她/, "").replace(/^告诉他/, "");
+  return cleaned;
 }
 
 function buildTaskDrafts(text: string, elders: Elder[], currentElder: Elder | null) {
@@ -469,25 +540,82 @@ function buildCareReply(elderName: string) {
   return `${elderName}，不着急，听到了就回我一声。要是今天有什么想说的，也可以直接告诉我。`;
 }
 
-function buildCallScript(task: Task | null, elder: Elder | null) {
+function rewriteRelayMessage(rawMessage: string, elderName: string, childName?: string): string {
+  const cleaned = rawMessage.trim();
+  const name = childName ?? "孩子";
+
+  // Common patterns
+  if (cleaned.includes("忙") && (cleaned.includes("没空") || cleaned.includes("没时间"))) {
+    return `${name}这两天确实忙，可能没顾上打电话。但TA特意让我来问问您，不是不惦记。`;
+  }
+  if (cleaned.includes("加班")) {
+    return `${name}最近加班比较多，可能没顾上联系您。但TA心里一直惦记着，特意让我来问候一声。`;
+  }
+  if (cleaned.includes("不是不想")) {
+    return `${name}让我跟您说，最近确实比较忙，不是不想您，您别多想。`;
+  }
+  if (cleaned.includes("想你") || cleaned.includes("惦记")) {
+    return `${name}让我转告您，TA一直惦记着您，就是最近有点忙不过来。`;
+  }
+  // Default: wrap with warmth
+  return `${name}特意让我转告您：${cleaned}。TA虽然没亲自打电话，但心里一直记挂您。`;
+}
+
+type CareTopic = "health" | "daily_life" | "weather" | "food" | "mood" | "family_update";
+
+function pickCareTopic(callCount: number): CareTopic {
+  const rotation: CareTopic[] = ["health", "daily_life", "mood", "weather", "food", "family_update"];
+  return rotation[callCount % rotation.length];
+}
+
+function buildCareQuestion(topic: CareTopic, elderName: string): string {
+  const questions: Record<CareTopic, string> = {
+    health: `${elderName}，最近身体感觉怎么样？有没有哪里不舒服？`,
+    daily_life: `${elderName}，这两天都忙些什么呢？有没有出去走走？`,
+    mood: `${elderName}，今天心情怎么样？有没有什么开心的事？`,
+    weather: `${elderName}，最近天气变化大，您要注意加减衣服呀。`,
+    food: `${elderName}，最近胃口怎么样？有没有好好吃饭？`,
+    family_update: `${elderName}，家里最近都挺好的吧？有没有什么需要帮忙的？`,
+  };
+  return questions[topic];
+}
+
+function buildCallScript(task: Task | null, elder: Elder | null, relayMessage?: string) {
   const elderName = elder?.displayName ?? "您";
-  if (!task) {
-    return `${elderName}，我是家里小助理。孩子刚刚惦记你，想让我来问一声：你今天还好吗？你要是方便，就慢慢回我一句，我帮你带给孩子。`;
+
+  // Build staged conversation: greeting → relay → care → task → closing
+  const greeting = `${elderName}，晚上好呀。我是${elder?.relation ?? "家里"}那边的小助理，孩子今天有点惦记您，让我来问候一声。`;
+
+  let relayPart = "";
+  if (relayMessage) {
+    const rewritten = rewriteRelayMessage(relayMessage, elderName);
+    relayPart = rewritten;
   }
 
-  if (task.type === "medication") {
-    return `${elderName}，我是家里小助理。孩子惦记你，托我来提醒一声：药记得按时吃。吃过了就回我一句，我也能让孩子放心一点。`;
+  let taskPart = "";
+  if (task) {
+    if (task.type === "medication") {
+      taskPart = `对了，孩子托我提醒您一声：药记得按时吃。吃过了就跟我说一句，我也好让孩子放心。`;
+    } else if (task.type === "health_measurement") {
+      taskPart = `还有件事，孩子想问问您今天方不方便量一下身体。等您测好了，慢慢告诉我一声就行。`;
+    } else if (task.type === "call_back") {
+      taskPart = `孩子说方便的时候给您回个电话，您要是有空就接一下，不着急的。`;
+    } else {
+      taskPart = `孩子还让我提醒您：${task.content}。忙完了回我一句就好。`;
+    }
   }
 
-  if (task.type === "health_measurement") {
-    return `${elderName}，我是家里小助理。孩子想着你呢，想问问你今天方不方便量一下。等你测好了，慢慢告诉我一声就行。`;
-  }
+  const carePart = buildCareQuestion(pickCareTopic(Date.now() % 6), elderName);
+  const closing = `您要是还有什么想跟孩子说的，也可以直接告诉我，我帮您带到。`;
 
-  if (task.type === "call_back") {
-    return `${elderName}，我是家里小助理。家里人在惦记你，方便的时候给孩子回个电话就好，不着急。`;
-  }
+  // Combine in natural order
+  const parts = [greeting];
+  if (relayPart) parts.push(relayPart);
+  if (taskPart) parts.push(taskPart);
+  parts.push(carePart);
+  parts.push(closing);
 
-  return `${elderName}，我是家里小助理。孩子想着你呢，想让我提醒你一声：${task.content}。你听到了或者忙完了，回我一句就好。`;
+  return parts.join(" ");
 }
 
 function getLatestTaskForElder(tasks: Task[], elderId: string | null) {
@@ -513,6 +641,11 @@ function buildDemoState(): StoredState {
       responseHabit: "上午更容易接电话",
       nicknames: buildNicknames("妈妈", "妈妈"),
       recentResponseAt: "10 分钟前",
+      oneLinePortrait: "总惦记你有没有好好吃饭",
+      healthFocus: ["血压", "降压药", "睡眠"],
+      recentSignals: ["最近提到有点头晕", "最近睡眠不太好"],
+      personalityTraits: ["嘴上说不用管，但接到电话会开心", "喜欢先聊两句再说正事"],
+      relationshipMemories: ["妈妈经常叮嘱你好好吃饭", "听说你加班会担心", "希望你有空回电话"],
     },
     {
       id: "elder_dad",
@@ -525,6 +658,11 @@ function buildDemoState(): StoredState {
       responseHabit: "晚上不太看消息",
       nicknames: buildNicknames("爸爸", "爸爸"),
       recentResponseAt: "昨天 20:10",
+      oneLinePortrait: "不爱主动说累，总说自己没事",
+      healthFocus: ["血糖", "饮食"],
+      recentSignals: ["血糖控制得不错"],
+      personalityTraits: ["不喜欢被催", "嘴硬心软"],
+      relationshipMemories: ["爸爸嘴上不说，但你打电话他会开心很久"],
     },
   ];
 
@@ -566,10 +704,12 @@ function buildDemoState(): StoredState {
       needConfirmation: true,
       needResult: false,
       status: "unconfirmed",
+      relayMessage: "最近加班，不是不想她",
       createdAt: nowLabel(),
       updatedAt: nowLabel(),
       logs: [
         buildExecutionLog("已创建任务"),
+        buildExecutionLog("已设置传话：最近加班，不是不想她"),
         buildExecutionLog("已发起电话提醒"),
         buildExecutionLog("第一次未接通，10 分钟后重试"),
       ],
@@ -621,6 +761,30 @@ function buildDemoState(): StoredState {
     currentElderId: "elder_mom",
     assistantProfile: DEFAULT_ASSISTANT_PROFILE,
     assistantMemories: [],
+    memoryEntries: [
+      { id: uid("mem"), category: "about_user", content: "最近项目上线，经常加班", importance: "medium", createdAt: nowLabel() },
+      { id: uid("mem"), category: "about_user", content: "不太会直接表达关心", importance: "medium", createdAt: nowLabel() },
+      { id: uid("mem"), category: "about_elder", content: "妈妈不喜欢一上来就被问身体", importance: "high", createdAt: nowLabel() },
+      { id: uid("mem"), category: "about_elder", content: "晚上 8 点后比较愿意接电话", importance: "medium", createdAt: nowLabel() },
+      { id: uid("mem"), category: "relationship", content: "妈妈总叮嘱你好好吃饭", importance: "high", createdAt: nowLabel() },
+      { id: uid("mem"), category: "relationship", content: "她嘴上说不用管，其实盼你回电话", importance: "high", createdAt: nowLabel() },
+      { id: uid("mem"), category: "communication_style", content: "转达时不要太肉麻", importance: "low", createdAt: nowLabel() },
+      { id: uid("mem"), category: "communication_style", content: "用惦记比担心更合适", importance: "low", createdAt: nowLabel() },
+      { id: uid("mem"), category: "pending_review", content: "妈妈最近可能睡眠不好", importance: "medium", createdAt: nowLabel() },
+    ],
+    callInsights: [
+      {
+        id: uid("insight"),
+        taskId: "demo_insight_1",
+        elderId: "elder_dad",
+        elderDisplayName: "爸爸",
+        factualSummary: "爸爸今天测了血糖，结果是 6.1，控制得不错。听说你最近忙，他说了句别太累。",
+        relationshipInsight: "爸爸嘴上不怎么表达，但他接电话时语气是开心的。他不太会主动说想你，但每次你联系他，他都会高兴很久。",
+        suggestedAction: "爸爸血糖稳定，你可以放心。这周末有空的话，给他回个电话，他会很高兴。",
+        suggestedMessage: "爸，听说你血糖控制得挺好的，辛苦你了。",
+        createdAt: nowLabel(),
+      },
+    ],
   };
 }
 
@@ -649,7 +813,6 @@ export default function HomePage() {
   const [hydrated, setHydrated] = useState(false);
   const [userMode, setUserMode] = useState<UserMode | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("home");
-  const [lastPrimaryTab, setLastPrimaryTab] = useState<TabKey>("home");
   const [isPeopleDrawerOpen, setIsPeopleDrawerOpen] = useState(false);
   const [elders, setElders] = useState<Elder[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -657,8 +820,15 @@ export default function HomePage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [elderMessages, setElderMessages] = useState<Message[]>([]);
   const [assistantMemories, setAssistantMemories] = useState<AssistantMemory[]>([]);
+  const [memoryEntries, setMemoryEntries] = useState<MemoryEntry[]>([]);
   const [currentElderId, setCurrentElderId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [elderDetailId, setElderDetailId] = useState<string | null>(null);
+  const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
+  const [newMemoryText, setNewMemoryText] = useState("");
+  const [newMemoryCategory, setNewMemoryCategory] = useState<MemoryCategory>("about_elder");
+  const [taskCreateFlow, setTaskCreateFlow] = useState<TaskCreateFlow>({ step: "idle", rawText: "", targets: [], taskType: "other", remindLabel: "", repeatRule: "none", relayMessage: "", recommendedSlots: [] });
+  const [callInsights, setCallInsights] = useState<CallInsight[]>([]);
   const [input, setInput] = useState("");
   const [elderInput, setElderInput] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -685,6 +855,10 @@ export default function HomePage() {
   });
   const [agentElderInput, setAgentElderInput] = useState("");
   const [schedulerResult, setSchedulerResult] = useState<string | null>(null);
+  // Voice call modal state
+  const [voiceCallOpen, setVoiceCallOpen] = useState(false);
+  const [voiceCallSessionId, setVoiceCallSessionId] = useState<string | null>(null);
+  const [voiceCallInitialText, setVoiceCallInitialText] = useState("");
   const [elderForm, setElderForm] = useState<ElderFormState>({
     relation: "妈妈",
     displayName: "",
@@ -708,6 +882,8 @@ export default function HomePage() {
       setCurrentElderId(parsed.currentElderId);
       setAssistantProfile(parsed.assistantProfile ?? DEFAULT_ASSISTANT_PROFILE);
       setAssistantMemories(parsed.assistantMemories ?? []);
+      if (parsed.memoryEntries) setMemoryEntries(parsed.memoryEntries);
+      if (parsed.callInsights) setCallInsights(parsed.callInsights);
     }
     setHydrated(true);
   }, []);
@@ -724,9 +900,11 @@ export default function HomePage() {
       currentElderId,
       assistantProfile,
       assistantMemories,
+      memoryEntries,
+      callInsights,
     };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
-  }, [hydrated, userMode, elders, tasks, notifications, messages, elderMessages, currentElderId, assistantProfile, assistantMemories]);
+  }, [hydrated, userMode, elders, tasks, notifications, messages, elderMessages, currentElderId, assistantProfile, assistantMemories, memoryEntries, callInsights]);
 
   const currentElder = useMemo(
     () => elders.find((elder) => elder.id === currentElderId) ?? null,
@@ -750,11 +928,58 @@ export default function HomePage() {
 
   const currentSummary = useMemo(() => summarizeTasks(tasks, currentElder), [tasks, currentElder]);
 
-  useEffect(() => {
-    if (activeTab === "home" || activeTab === "tasks" || activeTab === "profile") {
-      setLastPrimaryTab(activeTab);
+  // Proactive care suggestions (Step 5) — warm, actionable, no guilt-trip
+  const proactiveSuggestions = useMemo(() => {
+    const suggestions: { text: string; action?: string; elderId?: string }[] = [];
+    const timeoutTasks = tasks.filter((t) => t.status === "timeout");
+    const unconfirmedTasks = tasks.filter((t) => t.status === "unconfirmed");
+    const completedToday = tasks.filter((t) => t.status === "completed" || t.status === "confirmed");
+
+    // Timeout: elder didn't pick up → suggest calling personally
+    if (timeoutTasks.length > 0) {
+      const t = timeoutTasks[0];
+      suggestions.push({
+        text: `今天给${t.elderDisplayName}打了电话，TA没接到。要是你方便的话，直接给TA回一个会更放心。`,
+        action: "打电话",
+        elderId: t.elderId,
+      });
     }
-  }, [activeTab]);
+
+    // Waiting for confirmation → reassure, no action needed
+    if (unconfirmedTasks.length > 0 && timeoutTasks.length === 0) {
+      const t = unconfirmedTasks[0];
+      suggestions.push({
+        text: `已经提醒了${t.elderDisplayName}，正在等TA回复。你先忙你的，有消息我第一时间告诉你。`,
+      });
+    }
+
+    // Completed today + has insight → suggest follow-up action
+    if (completedToday.length > 0 && callInsights.length > 0 && suggestions.length < 2) {
+      const latest = callInsights[0];
+      if (latest.suggestedAction) {
+        suggestions.push({
+          text: latest.suggestedAction,
+          action: latest.suggestedMessage ? "用这句" : undefined,
+          elderId: latest.elderId,
+        });
+      }
+    }
+
+    // No recent contact → gentle nudge with time-bound suggestion
+    if (suggestions.length === 0 && elders.length > 0) {
+      const elder = currentElder ?? elders[0];
+      const recentResponse = elder.recentResponseAt;
+      if (!recentResponse || recentResponse.includes("暂未") || recentResponse.includes("未")) {
+        suggestions.push({
+          text: `这几天还没和${elder.displayName}聊过。如果你今天有 3 分钟，可以给TA回个电话，不用聊很久。`,
+          action: "打电话",
+          elderId: elder.id,
+        });
+      }
+    }
+
+    return suggestions.slice(0, 2);
+  }, [tasks, elders, currentElder, callInsights]);
 
   const callProgressSteps = [
     {
@@ -948,6 +1173,7 @@ export default function HomePage() {
     setAssistantMemories(demo.assistantMemories ?? []);
     setCurrentElderId(demo.currentElderId);
     setAssistantProfile(demo.assistantProfile);
+    setCallInsights(demo.callInsights ?? []);
     setActiveTab("home");
   }
 
@@ -965,6 +1191,11 @@ export default function HomePage() {
   function createTaskFromDraft(draft: TaskDraft) {
     if (draft.created) return;
 
+    const initLogs: TaskLog[] = [buildExecutionLog("已创建任务"), buildExecutionLog("已进入待提醒队列")];
+    if (draft.relayMessage) {
+      initLogs.push(buildExecutionLog(`已设置传话：${draft.relayMessage}`));
+    }
+
     const nextTask: Task = {
       id: uid("task"),
       title: draft.title,
@@ -978,9 +1209,10 @@ export default function HomePage() {
       needConfirmation: draft.needConfirmation,
       needResult: draft.needResult,
       status: "scheduled",
+      relayMessage: draft.relayMessage || undefined,
       createdAt: nowLabel(),
       updatedAt: nowLabel(),
-      logs: [buildExecutionLog("已创建任务"), buildExecutionLog("已进入待提醒队列")],
+      logs: initLogs,
     };
 
     setTasks((prev) => [nextTask, ...prev]);
@@ -989,14 +1221,14 @@ export default function HomePage() {
     markDraftCreated(draft.id);
     addNotification({
       title: `${draft.elderDisplayName}的提醒已创建`,
-      detail: `${draft.remindLabel}会通过${draft.channel}触达，回执状态会继续同步给你。`,
+      detail: `${draft.remindLabel}会通过${draft.channel}触达${draft.relayMessage ? `，并帮你传话：${draft.relayMessage}` : ""}。`,
       level: "info",
     });
     appendAssistantMessage({
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `我已经帮你排好了，到了 ${draft.remindLabel} 会先联系${draft.elderDisplayName}。`,
+      content: `我已经帮你排好了，到了 ${draft.remindLabel} 会先联系${draft.elderDisplayName}。${draft.relayMessage ? `你说的那句${draft.relayMessage}，我也会转告给TA的。` : ""}`,
     });
   }
 
@@ -1036,20 +1268,95 @@ export default function HomePage() {
         level: "info",
       });
     }
-    if (status === "confirmed") {
+
+    // ─── Step 4 & 5: Insight generation + warm receipt ───────────────
+    if (status === "confirmed" || status === "completed") {
+      const elder = elders.find((e) => e.id === task.elderId);
+      const elderName = task.elderDisplayName;
+
+      // Build warm receipt message (Step 5)
+      const factualParts: string[] = [];
+      if (status === "completed" && result) {
+        factualParts.push(result);
+      } else if (status === "confirmed") {
+        factualParts.push("知道了，收到了");
+      }
+      if (task.relayMessage) {
+        factualParts.push(`你托我传的那句话（${task.relayMessage}），我也转告给TA了`);
+      }
+
+      // Build relationship insight (Step 4)
+      const traits = elder?.personalityTraits ?? [];
+      const hasProudTrait = traits.some((t) => t.includes("嘴") || t.includes("不说") || t.includes("硬"));
+      const relationshipInsight = hasProudTrait
+        ? `${elderName}嘴上不说什么，但接到电话时语气是开心的。TA不太会主动表达想念，但每次你联系TA，TA都会高兴很久。`
+        : `${elderName}今天聊得挺好的。TA听说你惦记TA，应该挺欣慰的。`;
+
+      const suggestedAction = task.type === "medication"
+        ? `${elderName}的药已经确认了，你可以放心。这两天如果有空，给TA回个电话比发消息更好。`
+        : task.type === "health_measurement"
+          ? `${elderName}的指标出来了，情况还不错。你可以安心忙你的，周末有空再联系TA。`
+          : `${elderName}已经收到你的惦记了。如果你今晚有几分钟，给TA回个电话，TA会很高兴。`;
+
+      const suggestedMessage = `刚听说你挺好的，我就放心了。最近有点忙，但一直惦记你。`;
+
+      // Create insight
+      const insight: CallInsight = {
+        id: uid("insight"),
+        taskId: task.id,
+        elderId: task.elderId,
+        elderDisplayName: elderName,
+        factualSummary: factualParts.join("。"),
+        relationshipInsight,
+        suggestedAction,
+        suggestedMessage,
+        createdAt: nowLabel(),
+      };
+      setCallInsights((prev) => [insight, ...prev].slice(0, 20));
+
+      // Send warm receipt to child
+      const warmReceipt = `${elderName}刚刚接了电话。${factualParts.length > 0 ? `TA说：${factualParts.join("，")}。` : ""}${relationshipInsight} ${suggestedAction}`;
+
       addNotification({
-        title: `${task.elderDisplayName}说知道了`,
-        detail: `${task.title} 已确认收到。你可以先放心一点。`,
+        title: `${elderName}刚刚回复了`,
+        detail: warmReceipt,
         level: "success",
       });
-    }
-    if (status === "completed") {
-      addNotification({
-        title: `${task.elderDisplayName}已完成`,
-        detail: result ? `回复：${result}` : `${task.title} 已完成。`,
-        level: "success",
+
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "summary",
+        content: warmReceipt,
       });
+
+      // Auto-extract memory entries (Step 4)
+      const newMemories: MemoryEntry[] = [];
+      if (result && result.length > 0) {
+        newMemories.push({
+          id: uid("mem"),
+          category: "about_elder",
+          content: `${elderName}最近回复：${result}`,
+          source: `通话: ${task.title}`,
+          importance: "medium",
+          createdAt: nowLabel(),
+        });
+      }
+      if (task.relayMessage) {
+        newMemories.push({
+          id: uid("mem"),
+          category: "relationship",
+          content: `你让小助理给${elderName}带了句话：${task.relayMessage}`,
+          source: `通话: ${task.title}`,
+          importance: "medium",
+          createdAt: nowLabel(),
+        });
+      }
+      if (newMemories.length > 0) {
+        setMemoryEntries((prev) => [...newMemories, ...prev]);
+      }
     }
+
     if (status === "need_review") {
       addNotification({
         title: `${task.elderDisplayName}有一条回复待查看`,
@@ -1062,6 +1369,14 @@ export default function HomePage() {
         title: `${task.elderDisplayName}暂时还没回应`,
         detail: "我已经尝试两次提醒。你可以稍后亲自联系一下。",
         level: "warning",
+      });
+
+      // Proactive suggestion (Step 5)
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "text",
+        content: `${task.elderDisplayName}两次都没接到电话，可能有事在忙。你要是方便，直接给TA打个电话会更好。`,
       });
     }
   }
@@ -1132,19 +1447,12 @@ export default function HomePage() {
     setCallSession((prev) => ({ ...prev, open: false, phase: "ended" }));
   }
 
-  // ─── Agent Call API Handlers ────────────────────────────────────────────────
+  // ─── Voice Call Handler ────────────────────────────────────────────────
   async function startAgentCall() {
-    setAgentCall({
-      active: true,
-      sessionId: null,
-      phase: "dialing",
-      transcript: [],
-      stage: "",
-      taskSlots: {},
-      careInsight: null,
-      isProcessing: true,
-      finalizeResult: null,
-    });
+    // Open modal immediately with a connecting state
+    setVoiceCallSessionId(null);
+    setVoiceCallInitialText("");
+    setVoiceCallOpen(true);
 
     try {
       // Fetch occurrences to find one we can call
@@ -1162,22 +1470,26 @@ export default function HomePage() {
         const tickData = await tickRes.json();
         if (tickData.triggered && tickData.triggered.length > 0) {
           const occId = tickData.triggered[0].callSessionId;
-          // If scheduler already started a call, use its session
-          setAgentCall((prev) => ({
-            ...prev,
-            sessionId: occId,
-            phase: "connected",
-            isProcessing: false,
-            transcript: [{ role: "assistant", text: "调度器已触发通话，请通过下方输入框模拟老人回复。" }],
-          }));
+          const sessionRes = await fetch(`/api/calls/${occId}`);
+          const sessionData = await sessionRes.json();
+          const initialReply = sessionData.transcript?.[0]?.text ?? "你好呀，我是家里的小助理。";
+          setVoiceCallSessionId(occId);
+          setVoiceCallInitialText(initialReply);
           return;
         }
-        setAgentCall((prev) => ({
-          ...prev,
+        // No tasks at all
+        setVoiceCallOpen(false);
+        setAgentCall({
+          active: true,
+          sessionId: null,
           phase: "ended",
+          transcript: [{ role: "assistant", text: "当前没有可调度的任务实例，请先通过调度器Tick创建。" }],
+          stage: "",
+          taskSlots: {},
+          careInsight: null,
           isProcessing: false,
-          transcript: [{ role: "assistant", text: "当前没有可调度的任务实例，请先通过“调度器 Tick”创建。" }],
-        }));
+          finalizeResult: null,
+        });
         return;
       }
 
@@ -1193,23 +1505,22 @@ export default function HomePage() {
         throw new Error(startData.error ?? "Failed to start call");
       }
 
-      setAgentCall((prev) => ({
-        ...prev,
-        sessionId: startData.call_session_id,
-        phase: "connected",
-        stage: startData.stage ?? "",
-        isProcessing: false,
-        transcript: startData.initial_reply
-          ? [{ role: "assistant", text: startData.initial_reply }]
-          : [],
-      }));
+      // Populate the modal with session data
+      setVoiceCallSessionId(startData.call_session_id);
+      setVoiceCallInitialText(startData.initial_reply ?? "你好呀，我是家里的小助理。");
     } catch (err) {
-      setAgentCall((prev) => ({
-        ...prev,
+      setVoiceCallOpen(false);
+      setAgentCall({
+        active: true,
+        sessionId: null,
         phase: "ended",
-        isProcessing: false,
         transcript: [{ role: "assistant", text: `呼叫失败: ${err instanceof Error ? err.message : "未知错误"}` }],
-      }));
+        stage: "",
+        taskSlots: {},
+        careInsight: null,
+        isProcessing: false,
+        finalizeResult: null,
+      });
     }
   }
 
@@ -1446,25 +1757,7 @@ export default function HomePage() {
     }
 
     if (intent === "create_task") {
-      const draftResult = buildTaskDrafts(trimmed, elders, currentElder);
-      if ("error" in draftResult) {
-        const errorMessage = draftResult.error ?? "这件事我还差一点信息，先帮你补齐。";
-        appendAssistantMessage({
-          id: uid("msg"),
-          role: "assistant",
-          kind: "text",
-          content: errorMessage,
-        });
-        return;
-      }
-
-      appendAssistantMessage({
-        id: uid("msg"),
-        role: "assistant",
-        kind: "taskDraft",
-        content: "我帮你整理好了，确认一下就可以。",
-        drafts: draftResult.drafts,
-      });
+      startTaskCreation(trimmed);
       return;
     }
 
@@ -1474,6 +1767,189 @@ export default function HomePage() {
       kind: "text",
       content: "我目前最擅长 3 件事：创建提醒、查回执、把话改得更温柔。你可以直接对我说一句完整的话试试。",
     });
+  }
+
+  // ─── Multi-step Task Creation Flow ──────────────────────────────────
+  function startTaskCreation(text: string) {
+    const targets = detectTargetElders(text, elders, currentElder);
+    const remindLabel = parseRemindLabel(text);
+    const taskType = inferTaskType(text);
+    const repeatRule = text.includes("每天") ? "daily" : "none";
+
+    // No target elder
+    if (targets.length === 0) {
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "text",
+        content: "你想提醒哪位长辈？跟我说一下称呼就行。",
+      });
+      return;
+    }
+
+    // Time is missing - enter the flow asking for time
+    if (!remindLabel) {
+      const slots = recommendTimeSlots(targets[0]);
+      setTaskCreateFlow({
+        step: "awaiting_time",
+        rawText: text,
+        targets,
+        taskType,
+        remindLabel: "",
+        repeatRule,
+        relayMessage: "",
+        recommendedSlots: slots,
+      });
+      const slotHint = slots.length > 0
+        ? `${targets[0].displayName}之前${targets[0].availableTime}比较方便。${slots[0]} 这个时间可以吗？`
+        : "每天几点打比较合适？";
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "text",
+        content: `好，我先帮你整理一下。这是一个${repeatRule === "daily" ? "每日" : ""}电话提醒。${slotHint}`,
+      });
+      return;
+    }
+
+    // Time is present - go directly to relay question
+    setTaskCreateFlow({
+      step: "awaiting_relay",
+      rawText: text,
+      targets,
+      taskType,
+      remindLabel,
+      repeatRule,
+      relayMessage: "",
+      recommendedSlots: [],
+    });
+    appendAssistantMessage({
+      id: uid("msg"),
+      role: "assistant",
+      kind: "text",
+      content: `好的，${remindLabel}给${targets[0].displayName}打电话。要不要顺便帮你带句话？比如告诉TA你最近有点忙，但一直惦记着。`,
+    });
+  }
+
+  function handleTimeResponse(text: string) {
+    const flow = taskCreateFlow;
+    if (flow.targets.length === 0) {
+      setTaskCreateFlow((prev) => ({ ...prev, step: "idle" }));
+      return;
+    }
+
+    // Try to parse time from user response
+    let parsedTime = parseRemindLabel(text);
+    if (!parsedTime) {
+      // Check if user picked a recommended slot
+      const matchedSlot = flow.recommendedSlots.find((slot) =>
+        normalizeText(text).includes(normalizeText(slot).replace(/\s/g, "")),
+      );
+      if (matchedSlot) {
+        parsedTime = matchedSlot;
+      }
+    }
+
+    if (!parsedTime) {
+      // User didn't provide a clear time, check for affirmative ("可以", "行")
+      if (normalizeText(text).includes("可以") || normalizeText(text).includes("行") || normalizeText(text).includes("好")) {
+        parsedTime = flow.recommendedSlots[0] ?? "晚饭后 20:00";
+      }
+    }
+
+    if (!parsedTime) {
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "text",
+        content: "没太听明白时间，你直接说个大概就行，比如：晚饭后 8 点、早上 9 点。",
+      });
+      return;
+    }
+
+    // Move to relay question
+    setTaskCreateFlow({
+      ...flow,
+      step: "awaiting_relay",
+      remindLabel: parsedTime,
+    });
+
+    appendAssistantMessage({
+      id: uid("msg"),
+      role: "assistant",
+      kind: "text",
+      content: `好的，${parsedTime}给${flow.targets[0].displayName}打电话。要不要顺便帮你带句话？比如告诉TA你最近有点忙，但一直惦记着。`,
+    });
+  }
+
+  function handleRelayResponse(text: string) {
+    const flow = taskCreateFlow;
+    if (flow.targets.length === 0) {
+      setTaskCreateFlow((prev) => ({ ...prev, step: "idle" }));
+      return;
+    }
+
+    const normalized = normalizeText(text);
+    let relayMessage = "";
+
+    // Check if user declined
+    if (normalized.includes("不用") || normalized.includes("算了") || normalized.includes("没有") || normalized.includes("不用了")) {
+      relayMessage = "";
+    } else if (normalized.includes("可以") && normalized.length <= 4) {
+      // Just said "可以" without specifying - skip
+      relayMessage = "";
+    } else if (normalized.includes("就说") || normalized.includes("告诉她") || normalized.includes("告诉他") || normalized.length > 5) {
+      relayMessage = formatRelayForDraft(text, flow.targets[0].displayName);
+    }
+
+    // Generate the confirmation draft
+    const target = flow.targets[0];
+    const needResult = flow.taskType === "health_measurement" || flow.rawText.includes("告诉我") || flow.rawText.includes("数值");
+    const titleMap: Record<TaskType, string> = {
+      medication: `提醒${target.displayName}吃药`,
+      health_measurement: `提醒${target.displayName}测量`,
+      bring_items: `提醒${target.displayName}带好物品`,
+      call_back: `提醒${target.displayName}回电`,
+      other: `提醒${target.displayName}留意事项`,
+    };
+
+    const drafts: TaskDraft[] = flow.targets.map((elder) => ({
+      id: uid("draft"),
+      title: titleMap[flow.taskType],
+      type: flow.taskType,
+      elderId: elder.id,
+      elderDisplayName: elder.displayName,
+      content: buildTaskContent(flow.rawText, flow.taskType, elder.displayName),
+      remindLabel: flow.remindLabel,
+      repeatRule: flow.repeatRule,
+      channel: "电话提醒",
+      needConfirmation: true,
+      needResult,
+      priority: "normal",
+      created: false,
+      relayMessage,
+    }));
+
+    setTaskCreateFlow((prev) => ({ ...prev, step: "idle" }));
+
+    appendAssistantMessage({
+      id: uid("msg"),
+      role: "assistant",
+      kind: "taskDraft",
+      content: "我帮你整理好了，确认一下就可以。",
+      drafts,
+    });
+  }
+
+  function triggerQuickAction(action: "remind" | "note" | "status") {
+    const elderName = currentElder?.displayName ?? currentElder?.relation ?? "长辈";
+    const prompts = {
+      remind: `帮我给${elderName}发个提醒`,
+      note: `帮我给${elderName}写个小纸条`,
+      status: `看看${elderName}现在的状态`,
+    } as const;
+
+    void handleAgentSubmit(prompts[action]);
   }
 
   function applyAgentResponse(result: AgentServerResponse) {
@@ -1520,6 +1996,43 @@ export default function HomePage() {
   async function handleAgentSubmit(text = input) {
     const trimmed = text.trim();
     if (!trimmed || isSubmitting) return;
+
+    // If in a task creation flow, handle the response locally
+    if (taskCreateFlow.step === "awaiting_time") {
+      const userMessage: Message = {
+        id: uid("msg"),
+        role: "user",
+        kind: "text",
+        content: trimmed,
+      };
+      setMessages((prev) => [...prev, stampMessage(userMessage)]);
+      setInput("");
+      setIsSubmitting(true);
+      try {
+        handleTimeResponse(trimmed);
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
+    if (taskCreateFlow.step === "awaiting_relay") {
+      const userMessage: Message = {
+        id: uid("msg"),
+        role: "user",
+        kind: "text",
+        content: trimmed,
+      };
+      setMessages((prev) => [...prev, stampMessage(userMessage)]);
+      setInput("");
+      setIsSubmitting(true);
+      try {
+        handleRelayResponse(trimmed);
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
 
     const userMessage: Message = {
       id: uid("msg"),
@@ -1722,71 +2235,122 @@ export default function HomePage() {
     );
   }
 
+  const navActiveTab: "home" | "tasks" | "profile" | "notifications" =
+    activeTab === "assistant" ? "home" : activeTab;
+
   if (userMode === "elder") {
     return (
       <main className="mx-auto min-h-screen max-w-md px-0 text-stone-800">
         {callSession.open && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/45 p-4 backdrop-blur-sm">
-            <div className="w-full max-w-sm rounded-[36px] bg-stone-950 p-4 text-white shadow-2xl">
-              <div className="rounded-[28px] bg-[#1B1B1B] p-5">
-                <p className="text-center text-xs text-stone-400">小助理帮忙打电话</p>
-                <div className="mt-5 flex justify-center">
-                  <div className="flex h-24 w-24 items-center justify-center rounded-full bg-orange-300 text-3xl text-stone-900">
-                    助
-                  </div>
-                </div>
-                <p className="mt-4 text-center text-2xl font-semibold">{currentElder?.displayName ?? "长辈"}</p>
-                <p className="mt-2 text-center text-sm text-stone-400">
-                  {callSession.phase === "dialing" && "正在呼叫中..."}
-                  {callSession.phase === "connected" && "通话已接通"}
-                  {callSession.phase === "missed" && "暂时无人接听"}
-                  {callSession.phase === "ended" && "通话已结束"}
-                </p>
-                <div className="mt-5 flex items-end justify-center gap-2">
-                  {[28, 18, 30, 14, 26, 20].map((height, index) => (
-                    <span key={index} className="w-2 rounded-full bg-orange-300/80" style={{ height }} />
-                  ))}
-                </div>
-                <div className="mt-5 rounded-[24px] bg-white/8 p-4 text-sm leading-7 text-stone-100">
-                  {buildCallScript(currentCallTask, currentElder)}
-                </div>
-                <div className="mt-5 grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => updateCallPhase("connected")}
-                    className="min-h-12 rounded-2xl bg-emerald-500 px-4 py-3 text-sm font-medium"
-                  >
-                    模拟接通
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => updateCallPhase("missed")}
-                    className="min-h-12 rounded-2xl bg-rose-500 px-4 py-3 text-sm font-medium"
-                  >
-                    暂未接听
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (currentCallTask) applyTaskStatus(currentCallTask, "confirmed", "我知道了");
-                      closeCall();
-                    }}
-                    className="min-h-12 rounded-2xl bg-white/12 px-4 py-3 text-sm font-medium"
-                  >
-                    我知道了
-                  </button>
-                  <button
-                    type="button"
-                    onClick={closeCall}
-                    className="min-h-12 rounded-2xl bg-white/12 px-4 py-3 text-sm font-medium"
-                  >
-                    结束通话
-                  </button>
-                </div>
-              </div>
+          <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-stone-950 p-6 text-white">
+            <p className="text-center text-xs text-stone-400">来电中</p>
+            <p className="mt-1 text-center text-lg font-semibold text-stone-200">小助理</p>
+            <p className="mt-1 text-center text-sm text-stone-400">
+              {callSession.phase === "dialing" && "正在问候..."}
+              {callSession.phase === "connected" && "通话中"}
+              {callSession.phase === "missed" && "未接通"}
+              {callSession.phase === "ended" && "通话结束"}
+            </p>
+
+            <div className="mt-8 flex h-28 w-28 items-center justify-center rounded-full bg-gradient-to-br from-orange-400 to-orange-600 text-4xl font-bold shadow-[0_0_40px_rgba(249,115,22,0.4)]">
+              助
             </div>
+
+            <div className="mt-6 flex items-end justify-center gap-1.5">
+              {[20, 36, 16, 40, 24, 32, 14, 28].map((height, index) => (
+                <span
+                  key={index}
+                  className="w-1.5 rounded-full bg-orange-400/70 transition-all"
+                  style={{
+                    height: callSession.phase === "connected" || callSession.phase === "dialing" ? height : 8,
+                    animation: callSession.phase === "connected" || callSession.phase === "dialing" ? `pulse ${0.5 + index * 0.08}s ease-in-out infinite alternate` : "none",
+                  }}
+                />
+              ))}
+            </div>
+
+            <div className="mt-6 w-full max-w-xs rounded-[24px] bg-white/5 p-4 text-sm leading-7 text-stone-200">
+              {callSession.phase === "dialing" && "正在接通，请稍等..."}
+              {(callSession.phase === "connected" || callSession.phase === "ended") && (
+                buildCallScript(currentCallTask, currentElder, currentCallTask?.relayMessage)
+              )}
+              {callSession.phase === "missed" && "暂时没人接听，稍后再试。"}
+            </div>
+
+            {callSession.phase === "dialing" && (
+              <div className="mt-6 flex gap-4">
+                <button
+                  type="button"
+                  onClick={() => updateCallPhase("connected")}
+                  className="min-h-14 min-w-28 rounded-full bg-emerald-500 px-6 text-base font-medium shadow-lg"
+                >
+                  接听
+                </button>
+                <button
+                  type="button"
+                  onClick={() => updateCallPhase("missed")}
+                  className="min-h-14 min-w-28 rounded-full bg-rose-600 px-6 text-base font-medium shadow-lg"
+                >
+                  拒接
+                </button>
+              </div>
+            )}
+
+            {(callSession.phase === "connected" || callSession.phase === "ended") && (
+              <div className="mt-6 flex gap-4">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (currentCallTask) applyTaskStatus(currentCallTask, "confirmed", "我知道了");
+                    closeCall();
+                  }}
+                  className="min-h-12 rounded-full bg-white/10 px-6 text-sm font-medium"
+                >
+                  我知道了
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (currentCallTask) applyTaskStatus(currentCallTask, "completed", "好的，我说完了");
+                    closeCall();
+                  }}
+                  className="min-h-12 rounded-full bg-white/10 px-6 text-sm font-medium"
+                >
+                  我说完了
+                </button>
+                <button
+                  type="button"
+                  onClick={closeCall}
+                  className="min-h-12 rounded-full bg-rose-600 px-6 text-sm font-medium"
+                >
+                  挂断
+                </button>
+              </div>
+            )}
+
+            {callSession.phase === "missed" && (
+              <button
+                type="button"
+                onClick={closeCall}
+                className="mt-6 min-h-12 rounded-full bg-white/10 px-8 text-sm font-medium"
+              >
+                关闭
+              </button>
+            )}
           </div>
         )}
+
+        <VoiceCallModal
+          open={voiceCallOpen}
+          elderName={currentElder?.displayName ?? "长辈"}
+          callSessionId={voiceCallSessionId}
+          initialText={voiceCallInitialText}
+          onClose={() => {
+            setVoiceCallOpen(false);
+            setVoiceCallSessionId(null);
+            setVoiceCallInitialText("");
+          }}
+        />
 
         <section className="flex min-h-screen flex-col bg-[#FFF8F3]">
           <div className="border-b border-orange-100 bg-[linear-gradient(180deg,#FFF7EE_0%,#FFFDF9_100%)] px-4 pb-3 pt-[max(16px,env(safe-area-inset-top))]">
@@ -1832,6 +2396,13 @@ export default function HomePage() {
                 className="min-h-10 shrink-0 rounded-full border border-orange-100 bg-[#FFF1C7] px-4 text-sm text-stone-700"
               >
                 电话提醒
+              </button>
+              <button
+                type="button"
+                onClick={startAgentCall}
+                className="min-h-10 shrink-0 rounded-full bg-[#F2996E] px-4 text-sm font-medium text-white"
+              >
+                模拟语音电话
               </button>
               <button
                 type="button"
@@ -1907,74 +2478,36 @@ export default function HomePage() {
     >
       {callSession.open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(78,52,39,0.18)] p-4 backdrop-blur-sm">
-          <div className="w-full max-w-sm rounded-[36px] border border-orange-100 bg-[linear-gradient(180deg,#FFF9F3_0%,#FFF3E7_100%)] p-4 shadow-[0_24px_60px_rgba(145,94,61,0.2)]">
-            <div className="rounded-[30px] border border-orange-100/80 bg-white/88 p-5">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-xs font-medium tracking-[0.14em] text-orange-500">家里小助理来电</p>
-                  <p className="mt-2 text-2xl font-semibold text-stone-800">{currentElder?.displayName ?? "长辈"}</p>
-                  <p className="mt-1 text-sm text-stone-500">
-                    {callSession.phase === "dialing" && "正在轻轻提醒中"}
-                    {callSession.phase === "connected" && "已经接通，正在陪着说"}
-                    {callSession.phase === "missed" && "暂时没有接通"}
-                    {callSession.phase === "ended" && "这次通话先结束了"}
-                  </p>
-                </div>
-                <div className="rounded-full bg-[#FFF1C7] px-3 py-1 text-xs font-medium text-orange-600">
-                  {currentCallTask?.title ?? "问候一下"}
-                </div>
+          <div className="w-full max-w-sm rounded-[36px] border border-orange-100 bg-[linear-gradient(180deg,#FFF9F3_0%,#FFF3E7_100%)] p-6 shadow-[0_24px_60px_rgba(145,94,61,0.2)]">
+            <div className="text-center">
+              <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-[linear-gradient(180deg,#F6B58C_0%,#F2996E_100%)] text-2xl font-semibold text-white shadow-[0_14px_30px_rgba(242,153,110,0.3)]">
+                助
               </div>
-
-              <div className="mt-5 flex justify-center">
-                <div className="flex h-24 w-24 items-center justify-center rounded-full bg-[linear-gradient(180deg,#F6B58C_0%,#F2996E_100%)] text-3xl font-semibold text-white shadow-[0_14px_30px_rgba(242,153,110,0.3)]">
-                  助
+              <p className="mt-4 text-xs font-medium tracking-[0.14em] text-orange-500">
+                {callSession.phase === "dialing" && "正在给"}
+                {callSession.phase === "connected" && "已接通"}
+                {callSession.phase === "missed" && "未接通"}
+                {callSession.phase === "ended" && "通话结束"}
+              </p>
+              <p className="mt-2 text-xl font-semibold text-stone-800">{currentElder?.displayName ?? "长辈"}</p>
+              <p className="mt-2 text-sm leading-6 text-stone-500">
+                {callSession.phase === "dialing" && "正在拨打电话，请稍等..."}
+                {callSession.phase === "connected" && "已接听，正在通话中..."}
+                {callSession.phase === "missed" && "暂时没人接听，稍后会再试一次"}
+                {callSession.phase === "ended" && `${currentCallTask?.title ?? "问候"}已完成`}
+              </p>
+              {(callSession.phase === "connected" || callSession.phase === "ended") && (
+                <div className="mt-4 rounded-[20px] border border-orange-100 bg-white/80 p-3 text-xs text-stone-500">
+                  通话结束后，{currentElder?.displayName ?? "长辈"}的回复会自动同步给你
                 </div>
-              </div>
-
-              <div className="mt-5 rounded-[24px] border border-orange-100 bg-[#FFF8F3] p-4 text-sm leading-7 text-stone-700">
-                {buildCallScript(currentCallTask, currentElder)}
-              </div>
-
-              <div className="mt-5">
-                <p className="mb-2 text-xs text-stone-500">这通提醒现在走到这里</p>
-                <div className="flex gap-3 overflow-x-auto pb-2">
-                  {callProgressSteps.map((step, index) => (
-                    <div key={step.key} className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={step.onClick}
-                        className={`min-h-[84px] min-w-[118px] rounded-[22px] border px-4 py-3 text-left ${
-                          step.active
-                            ? "border-orange-200 bg-orange-50 text-stone-800"
-                            : step.done
-                              ? "border-emerald-200 bg-emerald-50 text-stone-800"
-                              : "border-stone-200 bg-stone-50 text-stone-500"
-                        }`}
-                      >
-                        <p className="text-sm font-medium">{step.label}</p>
-                        <p className="mt-1 text-xs">{step.hint}</p>
-                      </button>
-                      {index < callProgressSteps.length - 1 && <span className="text-stone-300">-</span>}
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => updateCallPhase("missed")}
-                    className="min-h-10 rounded-full border border-orange-100 bg-white px-4 text-xs text-stone-600"
-                  >
-                    暂时没接到
-                  </button>
-                  <button
-                    type="button"
-                    onClick={closeCall}
-                    className="min-h-10 rounded-full border border-orange-100 bg-white px-4 text-xs text-stone-600"
-                  >
-                    先收起
-                  </button>
-                </div>
-              </div>
+              )}
+              <button
+                type="button"
+                onClick={closeCall}
+                className="mt-5 min-h-12 w-full rounded-full bg-white/80 px-4 py-2 text-sm text-stone-600"
+              >
+                知道了
+              </button>
             </div>
           </div>
         </div>
@@ -2112,29 +2645,6 @@ export default function HomePage() {
         </div>
       )}
 
-      {userMode === "child" && (
-        <button
-          type="button"
-          onClick={() => setActiveTab((prev) => (prev === "notifications" ? lastPrimaryTab : "notifications"))}
-          className={`fixed right-3 top-3 z-40 inline-flex min-h-10 items-center gap-2 rounded-full border px-4 text-xs font-medium shadow-sm backdrop-blur sm:right-4 sm:top-4 ${
-            activeTab === "notifications"
-              ? "border-orange-200 bg-[#F2996E] text-white"
-              : "border-orange-100 bg-white/90 text-stone-700"
-          }`}
-        >
-          通知
-          {notifications.length > 0 && (
-            <span
-              className={`inline-flex min-w-5 items-center justify-center rounded-full px-1.5 py-0.5 text-[11px] ${
-                activeTab === "notifications" ? "bg-white/20 text-white" : "bg-orange-50 text-orange-600"
-              }`}
-            >
-              {Math.min(99, notifications.length)}
-            </span>
-          )}
-        </button>
-      )}
-
       {isPeopleDrawerOpen && (
         <div
           className="fixed inset-0 z-40 bg-stone-900/30 backdrop-blur-[2px]"
@@ -2195,10 +2705,10 @@ export default function HomePage() {
         </div>
       )}
 
-      <section className={activeTab === "home" ? "flex h-full flex-col overflow-hidden pb-[74px]" : "space-y-3 pb-24"}>
+      <section className={activeTab === "home" ? "flex h-full flex-col overflow-hidden pb-[172px]" : "space-y-3 pb-24"}>
         {activeTab === "home" && (
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] border border-orange-100 bg-[#FFF8F3] shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
-            <div className="border-b border-orange-100 bg-[linear-gradient(180deg,#FFF7EE_0%,#FFFDF9_100%)] px-4 py-4">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[28px] border border-[#E5D4C6] bg-[#F6EEE6] shadow-[0_20px_48px_rgba(145,94,61,0.10)]">
+            <div className="border-b border-[#E5D4C6] bg-[linear-gradient(180deg,#FFFFFF_0%,#FFF6EE_100%)] px-4 py-4 shadow-[0_8px_20px_rgba(145,94,61,0.06)]">
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
@@ -2208,7 +2718,7 @@ export default function HomePage() {
                       onClick={() => setActiveTab("assistant")}
                       className="min-h-8 rounded-full border border-orange-100 bg-white px-3 text-[11px] font-medium text-orange-600"
                     >
-                      性格
+                      记忆库
                     </button>
                   </div>
                   <p className="mt-1 text-[15px] text-stone-700">想到什么就说，我来帮你整理。</p>
@@ -2235,10 +2745,10 @@ export default function HomePage() {
               </div>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
+            <div className="min-h-0 flex-1 overflow-y-auto bg-[#F7EFE7] px-3 pb-[188px]">
               <div className="space-y-3">
                 <div
-                  className={`sticky top-0 z-10 -mx-1 rounded-[18px] border border-orange-100 bg-[#FFF1C7]/95 px-4 shadow-sm backdrop-blur ${
+                  className={`sticky top-0 z-10 -mx-1 rounded-[18px] border border-[#E8D8C8] bg-[#FFF8EF]/96 px-4 shadow-[0_10px_20px_rgba(145,94,61,0.08)] backdrop-blur ${
                     isSummaryExpanded ? "py-3" : "py-2"
                   }`}
                 >
@@ -2254,32 +2764,85 @@ export default function HomePage() {
                   </div>
                   {isSummaryExpanded && <p className="mt-1 text-sm leading-6 text-stone-700">{currentSummary}</p>}
                 </div>
+
+                {/* Proactive care suggestions (Step 5) */}
+                {proactiveSuggestions.length > 0 && (
+                  <div className="space-y-2">
+                    {proactiveSuggestions.map((sug, i) => (
+                      <div key={`proactive-${i}`} className="flex justify-start">
+                        <div className="max-w-[88%] rounded-[18px] border border-[#D9E8DB] bg-[#F6FBF7] px-4 py-3 shadow-sm">
+                          <p className="text-[10px] font-medium uppercase tracking-wider text-emerald-500/70">惦记一下</p>
+                          <p className="mt-1.5 text-[15px] leading-7 text-stone-700">{sug.text}</p>
+                          {sug.action && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (sug.action === "打电话") {
+                                  const elder = elders.find((e) => e.id === sug.elderId);
+                                  if (elder) {
+                                    const task = tasks.find(
+                                      (t) => t.elderId === elder.id && t.status !== "completed" && t.status !== "confirmed",
+                                    );
+                                    openCall(task ?? null, "child");
+                                  }
+                                } else if (sug.action === "用这句") {
+                                  const insight = callInsights[0];
+                                  if (insight?.suggestedMessage) {
+                                    setInput(insight.suggestedMessage);
+                                  }
+                                }
+                              }}
+                              className="mt-2 min-h-10 rounded-full bg-[#F2996E] px-4 py-1.5 text-xs font-medium text-white"
+                            >
+                              {sug.action}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 {messages.map((message) => (
                   <div key={message.id} className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}>
-                    <div
-                      className={`max-w-[88%] rounded-[20px] px-4 py-3 text-[15px] leading-7 shadow-sm ${
-                        message.role === "user"
-                          ? "bg-[#F2996E] text-white shadow-[0_10px_24px_rgba(242,153,110,0.22)]"
-                          : "border border-orange-100 bg-[#FFFDFB] text-stone-700"
-                      }`}
-                    >
+                    <div className="relative max-w-[88%]">
+                      <span
+                        aria-hidden="true"
+                        className={`absolute top-4 h-3 w-3 rotate-45 border-b border-r border-[#E2D1C3] bg-[#FFFDFC] ${
+                          message.role === "user" ? "-right-1.5" : "-left-1.5"
+                        }`}
+                      />
+                      <div className="relative rounded-[18px] border border-[#E2D1C3] bg-[#FFFDFC] px-4 py-3 text-[15px] leading-7 text-stone-700 shadow-[0_4px_12px_rgba(145,94,61,0.05)]">
                       <p>{message.content}</p>
                       {message.kind === "taskDraft" && message.drafts && (
                         <div className="mt-3 space-y-3">
                           {message.drafts.map((draft) => (
-                            <div key={draft.id} className="rounded-2xl border border-orange-100 bg-white p-4">
-                              <div className="flex items-center justify-between gap-3">
-                                <p className="font-semibold">{draft.title}</p>
-                                <span className="rounded-full bg-orange-50 px-3 py-1 text-xs text-orange-600">
-                                  {draft.priority}
-                                </span>
-                              </div>
-                              <div className="mt-3 grid gap-2 text-sm text-stone-600">
-                                <p>长辈：{draft.elderDisplayName}</p>
-                                <p>提醒时间：{draft.remindLabel}</p>
-                                <p>触达方式：{draft.channel}</p>
-                                <p>需要确认：{draft.needConfirmation ? "是" : "否"}</p>
-                                <p>需要结果：{draft.needResult ? "是" : "否"}</p>
+                            <div key={draft.id} className="rounded-2xl border border-[#F0D9BF] bg-[#FFF4E8] p-4">
+                              <p className="font-semibold text-stone-800">{draft.title}</p>
+                              <div className="mt-3 space-y-1.5 text-sm text-stone-600">
+                                <div className="flex gap-2">
+                                  <span className="text-stone-400">对象</span>
+                                  <span>{draft.elderDisplayName}</span>
+                                </div>
+                                <div className="flex gap-2">
+                                  <span className="text-stone-400">时间</span>
+                                  <span>{draft.remindLabel}</span>
+                                  {draft.repeatRule === "daily" && <span className="text-xs text-orange-400">每日</span>}
+                                </div>
+                                <div className="flex gap-2">
+                                  <span className="text-stone-400">方式</span>
+                                  <span>{draft.channel}</span>
+                                </div>
+                                <div className="flex gap-2">
+                                  <span className="text-stone-400">提醒</span>
+                                  <span>{draft.content}</span>
+                                </div>
+                                {draft.relayMessage && (
+                                  <div className="flex gap-2">
+                                    <span className="text-stone-400">传话</span>
+                                    <span className="text-orange-600">{draft.relayMessage}</span>
+                                  </div>
+                                )}
                               </div>
                               <div className="mt-4 flex flex-wrap gap-2">
                                 <button
@@ -2298,7 +2861,7 @@ export default function HomePage() {
                       {message.kind === "note" && message.noteVersions && (
                         <div className="mt-3 space-y-3">
                           {message.noteVersions.map((version) => (
-                            <div key={version.style} className="rounded-2xl bg-[#FFF1C7] p-4">
+                            <div key={version.style} className="rounded-2xl border border-[#F0D9BF] bg-[#FFF4E8] p-4">
                               <p className="text-xs text-stone-500">{version.style}</p>
                               <p className="mt-2 text-sm text-stone-700">{version.text}</p>
                               <div className="mt-3 flex flex-wrap gap-2">
@@ -2331,33 +2894,512 @@ export default function HomePage() {
                           </div>
                         </div>
                       )}
+                      </div>
                     </div>
                   </div>
                 ))}
                 {isSubmitting && (
                   <div className="flex justify-start">
-                    <div className="max-w-[88%] rounded-[20px] border border-orange-100 bg-[#FFFDFB] px-4 py-3 text-[15px] leading-7 text-stone-700">
-                      正在帮你想一想...
+                    <div className="relative max-w-[88%]">
+                      <span aria-hidden="true" className="absolute -left-1.5 top-4 h-3 w-3 rotate-45 border-b border-r border-[#E2D1C3] bg-[#FFFDFC]" />
+                      <div className="rounded-[18px] border border-[#E2D1C3] bg-[#FFFDFC] px-4 py-3 text-[15px] leading-7 text-stone-700 shadow-[0_4px_12px_rgba(145,94,61,0.05)]">
+                        正在帮你想一想...
+                      </div>
                     </div>
                   </div>
                 )}
               </div>
             </div>
 
-            <div className="border-t border-orange-100 bg-[linear-gradient(180deg,#FFFDF9_0%,#FFF5EA_100%)] px-3 pb-1 pt-3">
-              <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
-                {["发提醒", "写小纸条", "查状态", "电话触达"].map((label) => (
-                  <span key={label} className="shrink-0 rounded-full border border-orange-100/60 bg-white px-3 py-1.5 text-[11px] text-stone-500">
-                    {label}
-                  </span>
-                ))}
+          </div>
+        )}
+
+        {activeTab === "tasks" && (
+          <div className="space-y-3 pb-24">
+            {/* Scheduler toggle */}
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold">任务</h2>
+              <button
+                type="button"
+                onClick={triggerSchedulerTick}
+                className="min-h-10 rounded-full bg-violet-100 px-4 py-2 text-xs font-medium text-violet-700"
+              >
+                调度器 Tick
+              </button>
+            </div>
+            {schedulerResult && (
+              <div className="rounded-2xl border border-violet-200 bg-violet-50 p-3 text-xs text-violet-800 whitespace-pre-wrap">
+                {schedulerResult}
               </div>
-              <div className="flex items-end gap-2">
+            )}
+
+            {/* Simple task cards */}
+            {sortedTasks.map((task) => (
+              <div key={task.id}>
+                <button
+                  type="button"
+                  onClick={() => setSelectedTaskId(selectedTaskId === task.id ? null : task.id)}
+                  className="w-full rounded-[20px] border border-orange-100 bg-white p-4 text-left shadow-[0_8px_24px_rgba(242,153,110,0.08)]"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-semibold text-stone-800">{task.title}</p>
+                      <p className="mt-1 text-xs text-stone-500">
+                        {task.elderDisplayName} | {task.remindLabel} | {task.channel}
+                      </p>
+                    </div>
+                    <StatusBadge status={task.status} />
+                  </div>
+                </button>
+
+                {/* Expandable task detail */}
+                {selectedTaskId === task.id && (
+                  <div className="mt-2 space-y-3 rounded-[20px] border border-orange-200 bg-orange-50/30 p-4">
+                    {/* Task info */}
+                    <div className="space-y-1.5 text-sm text-stone-600">
+                      <p>任务内容：{task.content}</p>
+                      <p>回执要求：{task.needResult ? "需要结果" : "确认收到即可"}</p>
+                      <p>最近回复：{task.result ?? "还没有明确回复"}</p>
+                      {task.relayMessage && (
+                        <p className="text-orange-600">传话内容：{task.relayMessage}</p>
+                      )}
+                    </div>
+
+                    {/* Action buttons */}
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={startAgentCall}
+                        className="min-h-10 rounded-full bg-[#F2996E] px-4 py-2 text-xs font-medium text-white"
+                      >
+                        语音通话
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applyTaskStatus(task, "completed", task.needResult ? "血糖 6.1" : "做完了")}
+                        className="min-h-10 rounded-full bg-emerald-100 px-4 py-2 text-xs text-emerald-700"
+                      >
+                        标记完成
+                      </button>
+                    </div>
+
+                    {/* Execution records - expandable */}
+                    <div>
+                      <p className="mb-2 text-xs font-semibold text-stone-500">执行记录</p>
+                      <div className="space-y-2">
+                        {[...task.logs].reverse().map((log) => {
+                          const isExpanded = expandedLogId === log.id;
+                          return (
+                            <div key={log.id}>
+                              <button
+                                type="button"
+                                onClick={() => setExpandedLogId(isExpanded ? null : log.id)}
+                                className="flex w-full items-center justify-between rounded-xl border border-stone-100 bg-white px-3 py-2 text-left text-sm text-stone-600"
+                              >
+                                <span className="flex-1 truncate">{log.event}</span>
+                                <span className="ml-2 shrink-0 text-xs text-stone-400">{log.time}</span>
+                              </button>
+                              {isExpanded && (
+                                <div className="mt-1 rounded-xl bg-stone-50 p-3 text-xs leading-5 text-stone-500">
+                                  {log.event}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {sortedTasks.length === 0 && (
+              <div className="flex min-h-[200px] items-center justify-center text-sm text-stone-400">
+                还没有任务，在小助理里说点什么吧。
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "profile" && (
+          <div className="space-y-4 pb-24">
+            {/* Elder detail view */}
+            {elderDetailId ? (
+              (() => {
+                const detailElder = elders.find((e) => e.id === elderDetailId);
+                if (!detailElder) return null;
+                return (
+                  <div className="space-y-4">
+                    <button
+                      type="button"
+                      onClick={() => setElderDetailId(null)}
+                      className="min-h-10 rounded-full bg-orange-50 px-4 text-sm text-orange-600"
+                    >
+                      返回档案列表
+                    </button>
+                    <div className="rounded-[28px] border border-orange-100 bg-white p-5 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-orange-200 to-orange-300 text-2xl font-semibold text-stone-700">
+                          {detailElder.displayName.charAt(0)}
+                        </div>
+                        <div>
+                          <h2 className="text-xl font-semibold">{detailElder.displayName}</h2>
+                          <p className="text-sm text-stone-500">{detailElder.oneLinePortrait ?? detailElder.relation}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => beginEditElder(detailElder)}
+                          className="ml-auto min-h-10 rounded-full bg-orange-50 px-4 text-xs font-medium text-stone-700"
+                        >
+                          编辑
+                        </button>
+                      </div>
+                    </div>
+        
+                    {/* Health section */}
+                    <div className="rounded-[24px] border border-orange-100 bg-white p-4">
+                      <p className="text-sm font-semibold text-stone-700">身体状况</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {(detailElder.healthFocus ?? detailElder.focus).map((item) => (
+                          <span key={item} className="rounded-full bg-rose-50 px-3 py-1 text-xs text-rose-600">{item}</span>
+                        ))}
+                      </div>
+                      {detailElder.recentSignals && detailElder.recentSignals.length > 0 && (
+                        <div className="mt-3 space-y-1">
+                          {detailElder.recentSignals.map((sig, i) => (
+                            <p key={i} className="text-xs text-stone-500">{sig}</p>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+        
+                    {/* Personality section */}
+                    <div className="rounded-[24px] border border-orange-100 bg-white p-4">
+                      <p className="text-sm font-semibold text-stone-700">性格与沟通偏好</p>
+                      <div className="mt-2 space-y-1">
+                        {(detailElder.personalityTraits ?? []).map((trait, i) => (
+                          <p key={i} className="text-sm text-stone-600">{trait}</p>
+                        ))}
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {detailElder.communicationPreference.map((pref) => (
+                            <span key={pref} className="rounded-full bg-orange-50 px-3 py-1 text-xs text-orange-600">{pref}</span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+        
+                    {/* Relationship memories */}
+                    <div className="rounded-[24px] border border-orange-100 bg-white p-4">
+                      <p className="text-sm font-semibold text-stone-700">和你的核心记忆</p>
+                      <div className="mt-2 space-y-2">
+                        {(detailElder.relationshipMemories ?? []).map((mem, i) => (
+                          <div key={i} className="flex gap-2 text-sm text-stone-600">
+                            <span className="text-orange-400">-</span>
+                            <span>{mem}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+        
+                    {/* Basic info */}
+                    <div className="rounded-[24px] border border-orange-100 bg-white p-4">
+                      <p className="text-sm font-semibold text-stone-700">基础信息</p>
+                      <div className="mt-2 space-y-1 text-sm text-stone-600">
+                        <p>关系：{detailElder.relation}</p>
+                        <p>电话：{detailElder.phone}</p>
+                        <p>方便时间：{detailElder.availableTime}</p>
+                        <p>回应习惯：{detailElder.responseHabit || "待补充"}</p>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()
+            ) : (
+              <>
+                {/* Card grid */}
+                <div className="grid grid-cols-2 gap-3">
+                  {elders.map((elder) => (
+                    <button
+                      key={elder.id}
+                      type="button"
+                      onClick={() => setElderDetailId(elder.id)}
+                      className="flex min-h-[140px] flex-col justify-between rounded-[24px] border border-orange-100 bg-white p-4 text-left shadow-[0_8px_24px_rgba(242,153,110,0.08)] transition active:scale-[0.98]"
+                    >
+                      <div>
+                        <div className="flex items-center justify-between">
+                          <p className="text-lg font-semibold text-stone-800">{elder.displayName}</p>
+                          <span className={`h-2.5 w-2.5 rounded-full ${elder.recentResponseAt ? "bg-emerald-400" : "bg-amber-300"}`} />
+                        </div>
+                        <p className="mt-2 text-sm leading-5 text-stone-500">{elder.oneLinePortrait ?? elder.relation}</p>
+                      </div>
+                      <p className="mt-2 text-xs text-stone-400">{elder.recentResponseAt ?? "暂未联系"}</p>
+                    </button>
+                  ))}
+                </div>
+        
+                {/* Add elder button */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!editingElderId) resetForm();
+                    setShowAddElder(true);
+                  }}
+                  className="min-h-12 w-full rounded-[20px] border border-dashed border-orange-200 bg-orange-50/40 text-sm text-orange-500"
+                >
+                  + 添加一位长辈
+                </button>
+        
+                {/* Add elder form (collapsible) */}
+                {showAddElder && (
+                  <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-lg font-semibold">{editingElderId ? "编辑长辈" : "添加一位长辈"}</h2>
+                      <button
+                        type="button"
+                        onClick={() => { setShowAddElder(false); setEditingElderId(null); resetForm(); }}
+                        className="min-h-12 rounded-full bg-orange-50 px-4 py-2 text-xs text-orange-600"
+                      >
+                        收起
+                      </button>
+                    </div>
+                    <div className="mt-4 space-y-3">
+                      <select
+                        value={elderForm.relation}
+                        onChange={(event) => setElderForm((prev) => ({ ...prev, relation: event.target.value }))}
+                        className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+                      >
+                        {RELATION_OPTIONS.map((option) => (
+                          <option key={option}>{option}</option>
+                        ))}
+                      </select>
+                      <input
+                        value={elderForm.displayName}
+                        onChange={(event) => setElderForm((prev) => ({ ...prev, displayName: event.target.value }))}
+                        placeholder="显示称呼"
+                        className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+                      />
+                      <input
+                        value={elderForm.phone}
+                        onChange={(event) => setElderForm((prev) => ({ ...prev, phone: event.target.value }))}
+                        placeholder="手机号"
+                        className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+                      />
+                      <input
+                        value={elderForm.availableTime}
+                        onChange={(event) => setElderForm((prev) => ({ ...prev, availableTime: event.target.value }))}
+                        placeholder="方便接电话时间"
+                        className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+                      />
+                      <textarea
+                        value={elderForm.responseHabit}
+                        onChange={(event) => setElderForm((prev) => ({ ...prev, responseHabit: event.target.value }))}
+                        placeholder="响应习惯，比如：上午容易接电话，晚上不怎么看手机"
+                        className="min-h-24 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={createElder}
+                        className="min-h-12 w-full rounded-2xl bg-[#F2996E] px-4 py-3 text-sm font-medium text-white"
+                      >
+                        {editingElderId ? "保存修改" : "保存长辈档案"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {activeTab === "assistant" && (
+          <div className="space-y-4 pb-24">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-semibold">小助理记忆库</h2>
+                <p className="mt-1 text-sm text-stone-500">小助理会记住这些，用于更好的电话和对话</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab("home")}
+                className="min-h-10 rounded-full bg-orange-50 px-4 py-2 text-xs text-stone-700"
+              >
+                返回
+              </button>
+            </div>
+
+            {/* Call insights (Step 4) */}
+            {callInsights.length > 0 && (
+              <div className="rounded-[24px] border border-emerald-200 bg-emerald-50/50 p-4">
+                <p className="text-sm font-semibold text-emerald-700">亲情洞察</p>
+                <p className="mt-1 text-xs text-emerald-600/70">每次通话后自动生成，帮你更好地理解长辈</p>
+                <div className="mt-3 space-y-3">
+                  {callInsights.slice(0, 5).map((insight) => (
+                    <div key={insight.id} className="rounded-2xl border border-emerald-100 bg-white p-3">
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-medium text-stone-700">{insight.elderDisplayName}</p>
+                        <span className="text-xs text-stone-400">{insight.createdAt}</span>
+                      </div>
+                      {insight.factualSummary && (
+                        <p className="mt-2 text-sm text-stone-600">{insight.factualSummary}</p>
+                      )}
+                      <p className="mt-2 text-sm text-stone-500">{insight.relationshipInsight}</p>
+                      <div className="mt-2 rounded-xl bg-orange-50 px-3 py-2">
+                        <p className="text-xs text-orange-600">{insight.suggestedAction}</p>
+                      </div>
+                      {insight.suggestedMessage && (
+                        <div className="mt-2 flex items-center gap-2">
+                          <p className="flex-1 rounded-xl bg-stone-50 px-3 py-2 text-xs text-stone-500">{insight.suggestedMessage}</p>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setInput(insight.suggestedMessage);
+                              setActiveTab("home");
+                            }}
+                            className="shrink-0 rounded-full bg-[#F2996E] px-3 py-1.5 text-xs font-medium text-white"
+                          >
+                            用这句
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Memory categories */}
+            {([
+              { key: "about_user" as const, label: "关于你" },
+              { key: "about_elder" as const, label: "关于长辈" },
+              { key: "relationship" as const, label: "关于你们的关系" },
+              { key: "communication_style" as const, label: "沟通风格" },
+              { key: "pending_review" as const, label: "待确认记忆" },
+            ]).map((cat) => {
+              const entries = memoryEntries.filter((m) => m.category === cat.key);
+              if (entries.length === 0) return null;
+              return (
+                <div key={cat.key} className="rounded-[24px] border border-orange-100 bg-white p-4 shadow-[0_8px_24px_rgba(242,153,110,0.08)]">
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm font-semibold text-stone-700">{cat.label}</p>
+                    {cat.key === "pending_review" && (
+                      <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs text-amber-700">{entries.length} 条待确认</span>
+                    )}
+                  </div>
+                  <div className="mt-3 space-y-2">
+                    {entries.map((mem) => (
+                      <div key={mem.id} className="flex items-start justify-between gap-2 rounded-xl bg-stone-50/70 px-3 py-2">
+                        <div className="flex-1">
+                          <p className="text-sm text-stone-600">{mem.content}</p>
+                          {mem.importance === "high" && (
+                            <p className="mt-0.5 text-xs text-orange-400">重要</p>
+                          )}
+                        </div>
+                        <div className="flex shrink-0 gap-1">
+                          {cat.key === "pending_review" && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMemoryEntries((prev) => prev.map((m) => m.id === mem.id ? { ...m, category: "about_elder" } : m));
+                              }}
+                              className="rounded-lg bg-emerald-100 px-2 py-1 text-xs text-emerald-700"
+                            >
+                              确认
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setMemoryEntries((prev) => prev.filter((m) => m.id !== mem.id))}
+                            className="rounded-lg bg-stone-200 px-2 py-1 text-xs text-stone-500"
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+
+            {/* Add memory */}
+            <div className="rounded-[24px] border border-orange-100 bg-white p-4">
+              <p className="text-sm font-semibold text-stone-700">手动添加记忆</p>
+              <textarea
+                value={newMemoryText}
+                onChange={(e) => setNewMemoryText(e.target.value)}
+                placeholder="比如：妈妈不喜欢别人说她身体不好"
+                className="mt-2 min-h-16 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-sm outline-none"
+              />
+              <div className="mt-2 flex gap-2">
+                <select
+                  value={newMemoryCategory}
+                  onChange={(e) => setNewMemoryCategory(e.target.value as MemoryCategory)}
+                  className="min-h-10 rounded-full border border-orange-100 bg-orange-50/60 px-3 text-sm"
+                >
+                  <option value="about_user">关于你</option>
+                  <option value="about_elder">关于长辈</option>
+                  <option value="relationship">关系记忆</option>
+                  <option value="communication_style">沟通风格</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const text = newMemoryText.trim();
+                    if (!text) return;
+                    setMemoryEntries((prev) => [...prev, {
+                      id: uid("mem"),
+                      category: newMemoryCategory,
+                      content: text,
+                      source: "user_manual_input",
+                      importance: "medium",
+                      createdAt: nowLabel(),
+                    }]);
+                    setNewMemoryText("");
+                  }}
+                  className="min-h-10 flex-1 rounded-full bg-[#F2996E] px-4 text-sm font-medium text-white"
+                >
+                  添加
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {activeTab === "home" ? (
+        <div className="fixed inset-x-0 bottom-0 z-30 mx-auto max-w-5xl px-3 sm:px-4">
+          <div className="overflow-hidden rounded-[26px] border border-[#E2D1C3] bg-white shadow-[0_18px_40px_rgba(145,94,61,0.14)]">
+            <div className="bg-[linear-gradient(180deg,#FFF8F1_0%,#FFF1E5_100%)] px-3 pb-2 pt-3">
+              <div className="mb-2 grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => triggerQuickAction("remind")}
+                  className="min-h-11 rounded-[18px] border border-[#E2D1C3] bg-white text-xs font-medium text-stone-700"
+                >
+                  发个提醒
+                </button>
+                <button
+                  type="button"
+                  onClick={() => triggerQuickAction("note")}
+                  className="min-h-11 rounded-[18px] border border-[#E2D1C3] bg-white text-xs font-medium text-stone-700"
+                >
+                  写小纸条
+                </button>
+                <button
+                  type="button"
+                  onClick={() => triggerQuickAction("status")}
+                  className="min-h-11 rounded-[18px] border border-[#E2D1C3] bg-white text-xs font-medium text-stone-700"
+                >
+                  看长辈状态
+                </button>
+              </div>
+              <div className="flex items-end gap-2 rounded-[22px] border border-[#E2D1C3] bg-[#FFF9F4] px-3 py-3">
                 <textarea
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
                   placeholder="突然想起什么，就告诉我..."
-                  className="min-h-12 flex-1 resize-none rounded-[24px] border border-orange-100 bg-[#FFFDFB] px-4 py-3 text-[15px] text-stone-700 outline-none"
+                  className="min-h-12 flex-1 resize-none rounded-[22px] border border-[#E2D1C3] bg-white px-4 py-3 text-[15px] text-stone-700 outline-none"
                 />
                 <button
                   type="button"
@@ -2369,424 +3411,62 @@ export default function HomePage() {
                 </button>
               </div>
             </div>
-          </div>
-        )}
-
-        {activeTab === "tasks" && (
-          <div className="grid gap-4 xl:grid-cols-[1fr_0.95fr]">
-            <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
-              <div className="mb-4 flex items-center justify-between">
-                <div>
-                  <h2 className="text-lg font-semibold">任务列表</h2>
-                  <p className="text-sm text-stone-500">明确区分已触达、已确认和已完成</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={triggerSchedulerTick}
-                  className="min-h-10 rounded-full bg-violet-100 px-4 py-2 text-xs font-medium text-violet-700"
-                >
-                  ⚡ 调度器 Tick
-                </button>
-              </div>
-              {schedulerResult && (
-                <div className="mb-3 rounded-2xl border border-violet-200 bg-violet-50 p-3 text-xs text-violet-800 whitespace-pre-wrap">
-                  {schedulerResult}
-                </div>
-              )}
-              <div className="space-y-3">
-                {sortedTasks.map((task) => (
-                  <button
-                    key={task.id}
-                    type="button"
-                    onClick={() => setSelectedTaskId(task.id)}
-                    className={`min-h-24 w-full rounded-[24px] border p-4 text-left ${selectedTaskId === task.id ? "border-orange-300 bg-orange-50/60" : "border-stone-100 bg-stone-50/40"}`}
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <p className="font-semibold">{task.title}</p>
-                        <p className="mt-1 text-sm text-stone-500">
-                          {task.elderDisplayName}｜{task.remindLabel}｜{task.channel}
-                        </p>
-                      </div>
-                      <StatusBadge status={task.status} />
-                    </div>
-                    <p className="mt-3 text-sm text-stone-600">{task.content}</p>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
-              {selectedTask ? (
-                <>
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm text-stone-500">任务详情</p>
-                      <h2 className="text-lg font-semibold">{selectedTask.title}</h2>
-                    </div>
-                    <StatusBadge status={selectedTask.status} />
-                  </div>
-
-                  <div className="mt-4 grid gap-3 rounded-[24px] bg-orange-50/60 p-4 text-sm text-stone-700">
-                    <p>长辈：{selectedTask.elderDisplayName}</p>
-                    <p>时间：{selectedTask.remindLabel}</p>
-                    <p>触达方式：{selectedTask.channel}</p>
-                    <p>回执要求：{selectedTask.needResult ? "需要结果" : "确认收到即可"}</p>
-                    <p>最近回复：{selectedTask.result ?? "还没有明确回复"}</p>
-                  </div>
-
-                  <div className="mt-4 flex flex-wrap gap-2">
+            <div className="grid grid-cols-3 gap-2 border-t border-[#E2D1C3] bg-white/98 p-2 pb-[calc(4px+env(safe-area-inset-bottom))]">
+              {TABS.map((tab) => (
+                (() => {
+                  const isActive = navActiveTab === tab.key;
+                  return (
                     <button
+                      key={tab.key}
                       type="button"
-                      onClick={() => openCall(selectedTask, "child")}
-                      className="min-h-12 rounded-full bg-[#FFF1C7] px-4 py-2 text-xs text-stone-700"
+                      onClick={() => setActiveTab(tab.key)}
+                      className={`rounded-[18px] px-2 text-xs font-medium ${
+                        isActive
+                          ? tab.key === "home"
+                            ? "min-h-12 bg-[#F2996E] text-white"
+                            : "min-h-12 bg-orange-50 text-stone-800"
+                          : tab.key === "home"
+                            ? "min-h-12 bg-orange-50 text-stone-700"
+                            : "min-h-12 bg-transparent text-stone-500"
+                      }`}
                     >
-                      电话提醒
+                      {tab.label}
                     </button>
-                    <button
-                      type="button"
-                      onClick={startAgentCall}
-                      className="min-h-12 rounded-full bg-[#F2996E] px-4 py-2 text-xs font-medium text-white"
-                    >
-                      🤖 模拟 Agent 电话
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyTaskStatus(selectedTask, "reached")}
-                      className="min-h-12 rounded-full bg-sky-100 px-4 py-2 text-xs text-sky-700"
-                    >
-                      模拟电话触达
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyTaskStatus(selectedTask, "confirmed")}
-                      className="min-h-12 rounded-full bg-emerald-100 px-4 py-2 text-xs text-emerald-700"
-                    >
-                      模拟说知道了
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        applyTaskStatus(
-                          selectedTask,
-                          "completed",
-                          selectedTask.needResult ? "血糖 6.1" : "已经做完了",
-                        )
-                      }
-                      className="min-h-12 rounded-full bg-emerald-500 px-4 py-2 text-xs text-white"
-                    >
-                      模拟完成
-                    </button>
-                  </div>
-
-                  <div className="mt-5">
-                    <h3 className="text-sm font-semibold text-stone-700">执行记录</h3>
-                    <div className="mt-3 space-y-3">
-                      {[...selectedTask.logs].reverse().map((log) => (
-                        <div key={log.id} className="rounded-2xl border border-stone-100 bg-stone-50/70 p-3 text-sm text-stone-600">
-                          <p>{log.event}</p>
-                          <p className="mt-1 text-xs text-stone-400">{log.time}</p>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <div className="flex min-h-[280px] items-center justify-center text-sm text-stone-500">
-                  选中一条任务，就能查看完整回执链路。
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {activeTab === "notifications" && (
-          <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
-            <h2 className="text-lg font-semibold">通知中心</h2>
-            <p className="mt-1 text-sm text-stone-500">集中展示回执、未回应提醒和今日摘要</p>
-            <div className="mt-4 space-y-3">
-              {notifications.map((notice) => (
-                <div key={notice.id} className={`rounded-[24px] p-4 ${getNoticeClass(notice.level)}`}>
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="font-semibold">{notice.title}</p>
-                      <p className="mt-1 text-sm">{notice.detail}</p>
-                    </div>
-                    <span className="text-xs opacity-70">{notice.time}</span>
-                  </div>
-                </div>
+                  );
+                })()
               ))}
             </div>
           </div>
-        )}
-
-        {activeTab === "profile" && (
-          <div className="space-y-4">
-            <div className="grid gap-4 xl:grid-cols-[1fr_0.9fr]">
-              <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
-                <h2 className="text-lg font-semibold">长辈档案</h2>
-                <div className="mt-4 space-y-3">
-                  {currentElder ? (
-                    <div className="rounded-[24px] bg-orange-50/70 p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-xl font-semibold">{currentElder.displayName}</p>
-                          <p className="mt-2 text-sm text-stone-600">关系：{currentElder.relation}</p>
-                          <p className="mt-1 text-sm text-stone-600">电话：{currentElder.phone}</p>
-                          <p className="mt-1 text-sm text-stone-600">方便时间：{currentElder.availableTime}</p>
-                          <p className="mt-1 text-sm text-stone-600">回应习惯：{currentElder.responseHabit || "待补充"}</p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => beginEditElder(currentElder)}
-                          className="min-h-10 rounded-full bg-white px-4 text-xs font-medium text-stone-700"
-                        >
-                          编辑
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
-
-                  <div className="rounded-[24px] border border-orange-100 bg-white p-3">
-                    <p className="text-sm font-medium text-stone-700">全部长辈</p>
-                    <div className="mt-3 space-y-2">
-                      {elders.map((elder) => {
-                        const active = elder.id === currentElderId;
-                        return (
-                          <div
-                            key={elder.id}
-                            className={`flex items-center justify-between gap-3 rounded-2xl border px-4 py-3 ${
-                              active ? "border-orange-200 bg-orange-50/60" : "border-stone-100 bg-stone-50/40"
-                            }`}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => setCurrentElderId(elder.id)}
-                              className="min-h-10 flex-1 text-left"
-                            >
-                              <p className="font-medium text-stone-800">{elder.displayName}</p>
-                              <p className="mt-1 text-xs text-stone-500">{elder.relation} · {elder.phone}</p>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => beginEditElder(elder)}
-                              className="min-h-10 rounded-full border border-orange-100 bg-white px-4 text-xs font-medium text-stone-700"
-                            >
-                              编辑
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-lg font-semibold">{editingElderId ? "编辑长辈" : "添加一位长辈"}</h2>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowAddElder((prev) => {
-                        const next = !prev;
-                        if (next) {
-                          if (!editingElderId) resetForm();
-                        } else {
-                          setEditingElderId(null);
-                          resetForm();
-                        }
-                        return next;
-                      });
-                    }}
-                    className="min-h-12 rounded-full bg-orange-50 px-4 py-2 text-xs text-orange-600"
-                  >
-                    {showAddElder ? "收起" : editingElderId ? "继续编辑" : "展开"}
-                  </button>
-                </div>
-
-                {showAddElder ? (
-                  <div className="mt-4 space-y-3">
-                    <select
-                      value={elderForm.relation}
-                      onChange={(event) => setElderForm((prev) => ({ ...prev, relation: event.target.value }))}
-                      className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
-                    >
-                      {RELATION_OPTIONS.map((option) => (
-                        <option key={option}>{option}</option>
-                      ))}
-                    </select>
-                    <input
-                      value={elderForm.displayName}
-                      onChange={(event) => setElderForm((prev) => ({ ...prev, displayName: event.target.value }))}
-                      placeholder="显示称呼"
-                      className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
-                    />
-                    <input
-                      value={elderForm.phone}
-                      onChange={(event) => setElderForm((prev) => ({ ...prev, phone: event.target.value }))}
-                      placeholder="手机号"
-                      className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
-                    />
-                    <input
-                      value={elderForm.availableTime}
-                      onChange={(event) => setElderForm((prev) => ({ ...prev, availableTime: event.target.value }))}
-                      placeholder="方便接电话时间"
-                      className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
-                    />
-                    <textarea
-                      value={elderForm.responseHabit}
-                      onChange={(event) => setElderForm((prev) => ({ ...prev, responseHabit: event.target.value }))}
-                      placeholder="响应习惯，比如：上午容易接电话，晚上不怎么看手机"
-                      className="min-h-24 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
-                    />
-                    <button
-                      type="button"
-                      onClick={createElder}
-                      className="min-h-12 w-full rounded-2xl bg-[#F2996E] px-4 py-3 text-sm font-medium text-white"
-                    >
-                      {editingElderId ? "保存修改" : "保存长辈档案"}
-                    </button>
-                  </div>
-                ) : (
-                  <div className="mt-4 rounded-[24px] bg-orange-50/70 p-4 text-sm leading-6 text-stone-600">
-                    支持多位长辈独立维护画像、任务和回执。你也可以直接在聊天里说“我想加一下外公”。
-                  </div>
-                )}
-              </div>
-            </div>
-
-          </div>
-        )}
-
-        {activeTab === "assistant" && (
-          <div className="grid gap-4 xl:grid-cols-[1fr_0.95fr]">
-            <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
-              <div className="flex items-center justify-between gap-3">
-                <h2 className="text-lg font-semibold">编辑小助理性格</h2>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("home")}
-                  className="min-h-12 rounded-full bg-orange-50 px-4 py-2 text-xs text-stone-700"
-                >
-                  返回小助理
-                </button>
-              </div>
-              <p className="mt-1 text-sm text-stone-500">决定 TA 做电话提醒、发提醒和转述小纸条时的感觉。</p>
-
-              <div className="mt-4 space-y-4">
-                <div>
-                  <p className="mb-2 text-sm font-medium text-stone-700">语气</p>
-                  <div className="flex flex-wrap gap-2">
-                    {["温柔陪伴", "亲切直接", "像晚辈一样", "稳重安心"].map((item) => (
-                      <button
-                        key={item}
-                        type="button"
-                        onClick={() => setAssistantProfile((prev) => ({ ...prev, tone: item }))}
-                        className={`min-h-12 rounded-full px-3 py-2 text-sm ${assistantProfile.tone === item ? "bg-[#F2996E] text-white" : "bg-orange-50 text-stone-600"}`}
-                      >
-                        {item}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <p className="mb-2 text-sm font-medium text-stone-700">表达节奏</p>
-                  <div className="flex flex-wrap gap-2">
-                    {["简短清楚", "慢一点", "多提醒一句", "先寒暄再提醒"].map((item) => (
-                      <button
-                        key={item}
-                        type="button"
-                        onClick={() => setAssistantProfile((prev) => ({ ...prev, rhythm: item }))}
-                        className={`min-h-12 rounded-full px-3 py-2 text-sm ${assistantProfile.rhythm === item ? "bg-[#F2996E] text-white" : "bg-orange-50 text-stone-600"}`}
-                      >
-                        {item}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <p className="mb-2 text-sm font-medium text-stone-700">主动程度</p>
-                  <div className="flex flex-wrap gap-2">
-                    {["适度主动", "少打扰", "多确认一次", "需要时再追问"].map((item) => (
-                      <button
-                        key={item}
-                        type="button"
-                        onClick={() => setAssistantProfile((prev) => ({ ...prev, initiative: item }))}
-                        className={`min-h-12 rounded-full px-3 py-2 text-sm ${assistantProfile.initiative === item ? "bg-[#F2996E] text-white" : "bg-orange-50 text-stone-600"}`}
-                      >
-                        {item}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <p className="mb-2 text-sm font-medium text-stone-700">一句印象</p>
-                  <input
-                    value={assistantProfile.signature}
-                    onChange={(event) => setAssistantProfile((prev) => ({ ...prev, signature: event.target.value }))}
-                    className="min-h-12 w-full rounded-2xl border border-orange-100 bg-orange-50/60 px-4 py-3 text-base outline-none"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-[28px] border border-orange-100 bg-white p-4 shadow-[0_18px_50px_rgba(242,153,110,0.12)]">
-              <h2 className="text-lg font-semibold">预览效果</h2>
-              <div className="mt-4 rounded-[24px] bg-[#FFF1C7] p-4">
-                <p className="text-sm font-medium text-orange-600">给长辈的开场白</p>
-                <p className="mt-2 text-sm leading-7 text-stone-700">
-                  {buildAssistantPreview(assistantProfile, currentElder?.displayName ?? "妈妈")}
-                </p>
-              </div>
-
-              <div className="mt-4 rounded-[24px] border border-orange-100 bg-orange-50/50 p-4">
-                <p className="text-sm font-medium text-stone-700">电话提醒时会这样说</p>
-                <p className="mt-2 text-sm leading-7 text-stone-700">
-                  {buildCallScript(selectedTask ?? latestElderTask, currentElder)}
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => openCall(selectedTask ?? latestElderTask, "child")}
-                className="mt-4 min-h-12 w-full rounded-2xl bg-[#F2996E] px-4 py-3 text-sm font-medium text-white"
-              >
-                用这个性格试打一个电话
-              </button>
-            </div>
-          </div>
-        )}
-      </section>
-
-      <div className="fixed inset-x-0 bottom-0 z-30 mx-auto max-w-5xl px-3 pb-[calc(4px+env(safe-area-inset-bottom))] pt-0 sm:px-4">
-        <div className="grid grid-cols-3 gap-2 rounded-[26px] border border-orange-100 bg-white/95 p-2 shadow-[0_18px_40px_rgba(242,153,110,0.18)] backdrop-blur">
-          {TABS.map((tab) => (
-            <button
-              key={tab.key}
-              type="button"
-              onClick={() => setActiveTab(tab.key)}
-              className={`rounded-[18px] px-2 text-xs font-medium ${
-                (activeTab === tab.key ||
-                  (activeTab === "assistant" && tab.key === "home") ||
-                  (activeTab === "notifications" && tab.key === lastPrimaryTab)) ||
-                (activeTab === "notifications" && lastPrimaryTab === tab.key)
-                  ? tab.key === "home"
-                    ? "min-h-12 bg-[#F2996E] text-white"
-                    : "min-h-12 bg-orange-50 text-stone-800"
-                  : tab.key === "home"
-                    ? "min-h-12 bg-orange-50 text-stone-700"
-                    : "min-h-12 bg-transparent text-stone-500"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
         </div>
-      </div>
+      ) : (
+        <div className="fixed inset-x-0 bottom-0 z-30 mx-auto max-w-5xl px-3 pb-[calc(4px+env(safe-area-inset-bottom))] pt-0 sm:px-4">
+          <div className="grid grid-cols-3 gap-2 rounded-[26px] border border-orange-100 bg-white/95 p-2 shadow-[0_18px_40px_rgba(242,153,110,0.18)] backdrop-blur">
+            {TABS.map((tab) => (
+              (() => {
+                const isActive = navActiveTab === tab.key;
+                return (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setActiveTab(tab.key)}
+                    className={`rounded-[18px] px-2 text-xs font-medium ${
+                      isActive
+                        ? tab.key === "home"
+                          ? "min-h-12 bg-[#F2996E] text-white"
+                          : "min-h-12 bg-orange-50 text-stone-800"
+                        : tab.key === "home"
+                          ? "min-h-12 bg-orange-50 text-stone-700"
+                          : "min-h-12 bg-transparent text-stone-500"
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                );
+              })()
+            ))}
+          </div>
+        </div>
+      )}
     </main>
   );
 }
