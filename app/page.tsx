@@ -1887,8 +1887,9 @@ export default function HomePage() {
   }, [hydrated, identity?.userId, userMode, elders, tasks, notifications, messages, elderMessages, currentElderId, assistantProfile, assistantMemories, memoryEntries, callInsights]);
 
   // ── 跨设备同步：拉取远端状态（轮询 5s + 页面可见时 + storage 事件）──
+  const syncUserId = identity?.userId;
   useEffect(() => {
-    if (!hydrated || !identity?.userId) return;
+    if (!hydrated || !syncUserId) return;
 
     const applyRemoteState = (remote: StoredState) => {
       isSyncUpdate.current = true;
@@ -1918,7 +1919,7 @@ export default function HomePage() {
 
     const pullFromServer = async () => {
       try {
-        const res = await fetch(`/api/sync?userId=${encodeURIComponent(identity!.userId!)}`);
+        const res = await fetch(`/api/sync?userId=${encodeURIComponent(syncUserId)}`);
         const data = await res.json();
         if (data.state && data.timestamp > lastRemoteTimestamp.current) {
           lastRemoteTimestamp.current = data.timestamp;
@@ -1948,7 +1949,7 @@ export default function HomePage() {
       document.removeEventListener("visibilitychange", handleVisibility);
       window.removeEventListener("storage", handleStorage);
     };
-  }, [hydrated, identity?.userId]);
+  }, [hydrated, syncUserId]);
 
   const currentElder = useMemo(
     () => elders.find((elder) => elder.id === currentElderId) ?? null,
