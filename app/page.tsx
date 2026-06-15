@@ -275,11 +275,11 @@ const LOGIN_FORM_KEY = "yddj_login_form_v1";
 const USERS_REGISTRY_KEY = "yddj_users_registry";
 const BINDING_REQUESTS_KEY = "yddj_binding_requests";
 
-// 根据手机号生成唯一身份ID（后4位 + 4位随机后缀，避免重复）
+// 根据手机号生成确定性身份ID（同一手机号 → 同一 ID，跨环境一致）
+// 不再包含随机后缀，确保线上/本地/跨设备同一手机号得到同一 userId
 function generateUserId(phone: string): string {
   const digits = phone.replace(/\D/g, "").slice(-4);
-  const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
-  return `YD-${digits || "0000"}-${rand}`;
+  return `YD-${digits || "0000"}`;
 }
 
 // 用户注册表操作（模拟后端）
@@ -1570,6 +1570,28 @@ export default function HomePage() {
         if (saved) {
           const parsed = JSON.parse(saved) as Identity;
           if ((parsed.role === "child" || parsed.role === "elder") && parsed.personId) {
+            // ── 迁移检查：如果 userId 不是确定性格式，迁移到新格式 ────
+            if (parsed.phone && parsed.userId) {
+              const deterministicUserId = generateUserId(parsed.phone);
+              if (parsed.userId !== deterministicUserId) {
+                // 迁移注册表
+                const registry = loadUsersRegistry();
+                if (registry[parsed.userId]) {
+                  const oldAccount = registry[parsed.userId];
+                  delete registry[parsed.userId];
+                  oldAccount.userId = deterministicUserId;
+                  registry[deterministicUserId] = oldAccount;
+                  saveUsersRegistry(registry);
+                }
+                // 更新 identity
+                parsed.userId = deterministicUserId;
+                parsed.personId = parsed.role === "child"
+                  ? `user_${deterministicUserId}`
+                  : `elder_${deterministicUserId}`;
+                // 更新 IDENTITY_KEY
+                window.localStorage.setItem(IDENTITY_KEY, JSON.stringify(parsed));
+              }
+            }
             next = parsed;
             // 恢复登录表单字段
             if (parsed.phone) setLoginPhone(parsed.phone);
@@ -1590,6 +1612,34 @@ export default function HomePage() {
           if (form.phone) setLoginPhone(form.phone);
           if (form.name) setLoginName(form.name);
           if (form.role) setLoginRole(form.role);
+
+          // ── 自动恢复登录：如果注册表里有该手机号的旧账号，直接登录 ────
+          if (form.phone && form.name) {
+            const registry = loadUsersRegistry();
+            const existingAccount = Object.values(registry).find(
+              (acc) => acc.phone === form.phone,
+            );
+            if (existingAccount) {
+              // 迁移旧版随机后缀 userId → 确定性 userId
+              const deterministicUserId = generateUserId(form.phone);
+              if (existingAccount.userId !== deterministicUserId) {
+                delete registry[existingAccount.userId];
+                existingAccount.userId = deterministicUserId;
+                registry[deterministicUserId] = existingAccount;
+                saveUsersRegistry(registry);
+              }
+              const personId = existingAccount.role === "child"
+                ? `user_${existingAccount.userId}`
+                : `elder_${existingAccount.userId}`;
+              next = {
+                role: existingAccount.role,
+                personId,
+                phone: existingAccount.phone,
+                userId: existingAccount.userId,
+                displayName: existingAccount.displayName,
+              };
+            }
+          }
         }
       } catch {
         // ignore
@@ -1651,25 +1701,38 @@ export default function HomePage() {
     }
   }, []);
 
-  // 手机号登录
+  // 手机号登录（手机号是唯一数据入口：同一手机号 = 同一 userId，跨环境一致）
   const loginWithPhone = useCallback(() => {
     const phone = loginPhone.trim();
     const name = loginName.trim();
     if (!phone || !name) return;
 
-    const userId = generateUserId(phone);
+    const registry = loadUsersRegistry();
+    // ── 确定性 userId：同一手机号永远生成同一 ID ──────────────────────
+    const deterministicUserId = generateUserId(phone);
+    // ── 按手机号查注册表：复用旧账号 ──────────────────────────────────
+    const existingAccount = Object.values(registry).find(
+      (acc) => acc.phone === phone,
+    );
+    // 如果旧账号的 userId 不是确定性格式（旧版随机后缀 bug），迁移到确定性 userId
+    let userId = deterministicUserId;
+    if (existingAccount && existingAccount.userId !== deterministicUserId) {
+      // 迁移：删除旧记录，用确定性 userId 重建
+      delete registry[existingAccount.userId];
+    } else if (existingAccount) {
+      userId = existingAccount.userId;
+    }
     const role = loginRole;
 
     // 注册/更新用户账号（模拟后端）
-    const registry = loadUsersRegistry();
     const account: UserAccount = {
       userId,
       phone,
       role,
       displayName: name,
-      boundPartnerId: registry[userId]?.boundPartnerId,
-      boundPartnerName: registry[userId]?.boundPartnerName,
-      createdAt: registry[userId]?.createdAt ?? nowLabel(),
+      boundPartnerId: existingAccount?.boundPartnerId,
+      boundPartnerName: existingAccount?.boundPartnerName,
+      createdAt: existingAccount?.createdAt ?? nowLabel(),
     };
     registry[userId] = account;
     saveUsersRegistry(registry);
@@ -1821,19 +1884,18 @@ export default function HomePage() {
     setTimeout(() => setBindingToast(null), 2500);
   }, [identity, refreshAccountInfo]);
 
-  // 退出身份 / 重选
+  // 退出身份 / 重选（保留 LOGIN_FORM_KEY，下次进入自动恢复登录信息）
   const clearIdentity = useCallback(() => {
     setIdentity(null);
     setUserMode(null);
     setMyAccount(null);
     setBindingRequests([]);
     setBindingInputId("");
-    setLoginPhone("");
-    setLoginName("");
     setLoginStep("phone");
     if (typeof window !== "undefined") {
       try {
-        window.localStorage.removeItem(LOGIN_FORM_KEY);
+        // 保留 LOGIN_FORM_KEY：下次进入自动回填手机号/称呼/角色
+        // window.localStorage.removeItem(LOGIN_FORM_KEY);  // 已弃用：不再清理登录表单
         const url = new URL(window.location.href);
         url.searchParams.delete("role");
         url.searchParams.delete("personId");
@@ -2340,6 +2402,45 @@ export default function HomePage() {
   function createTaskFromDraft(draft: TaskDraft) {
     if (draft.created) return;
 
+    // ── 硬拦截：长辈 ID 校验（未注册 / 未绑定 必须经用户确认才能创建）────
+    const targetElder = elders.find(e => e.id === draft.elderId);
+    if (!targetElder) {
+      addNotification({
+        title: `${draft.elderDisplayName}档案不存在`,
+        detail: `请刷新页面或重新选择长辈后再试。`,
+        level: "danger",
+      });
+      return;
+    }
+    const registry = loadUsersRegistry();
+    const elderAccount = targetElder.phone
+      ? Object.values(registry).find(
+          acc => acc.phone === targetElder.phone && acc.role === "elder",
+        )
+      : undefined;
+    const notRegistered = !elderAccount;
+    const notBoundWithMe = !!elderAccount
+      && !!identity?.userId
+      && elderAccount.boundPartnerId !== identity.userId;
+
+    if (notRegistered || notBoundWithMe) {
+      const reason = notRegistered
+        ? `${draft.elderDisplayName}尚未绑定ID，届时可能无法自动触达`
+        : `${draft.elderDisplayName}尚未与你绑定，届时无法自动触达`;
+      const ok = typeof window !== "undefined"
+        ? window.confirm(`${reason}\n\n仍要创建这个任务吗？`)
+        : true;
+      if (!ok) {
+        addNotification({
+          title: `已取消创建提醒`,
+          detail: `${draft.elderDisplayName}的提醒任务未创建。`,
+          level: "info",
+        });
+        return;
+      }
+    }
+
+    // ── 校验通过 / 用户确认 → 创建任务 ──────────────────────────────
     const initLogs: TaskLog[] = [buildExecutionLog("已创建任务"), buildExecutionLog("已进入待提醒队列")];
     if (draft.relayMessage) {
       initLogs.push(buildExecutionLog(`已设置传话：${draft.relayMessage}`));
@@ -2377,41 +2478,34 @@ export default function HomePage() {
       id: uid("msg"),
       role: "assistant",
       kind: "text",
-      content: `帮你排好啦~到了${draft.remindLabel}，我会先联系${draft.elderDisplayName}的。${draft.relayMessage ? `你说的那句"${draft.relayMessage}"，我也帮你转告给${elderPronoun(elders.find(e => e.id === draft.elderId)?.relation ?? "")}呀~` : "你放心交给我吧~"}`,
+      content: `帮你排好啦~到了${draft.remindLabel}，我会先联系${draft.elderDisplayName}的。${draft.relayMessage ? `你说的那句"${draft.relayMessage}"，我也帮你转告给${elderPronoun(targetElder.relation ?? "")}呀~` : "你放心交给我吧~"}`,
     });
 
-    // ── 检查长辈是否已注册绑定ID，未绑定时提醒无法触达 ──────────────
-    const targetElder = elders.find(e => e.id === draft.elderId);
-    if (targetElder?.phone) {
-      const registry = loadUsersRegistry();
-      const elderAccount = Object.values(registry).find(
-        acc => acc.phone === targetElder.phone && acc.role === "elder",
-      );
-      if (!elderAccount) {
-        addNotification({
-          title: `${draft.elderDisplayName}尚未绑定ID`,
-          detail: `${draft.elderDisplayName}还没有注册账号，到了时间可能无法通过电话触达。建议你亲自提醒一下哦。`,
-          level: "warning",
-        });
-        appendAssistantMessage({
-          id: uid("msg"),
-          role: "assistant",
-          kind: "text",
-          content: `对了，提醒你一下~${draft.elderDisplayName}好像还没有在系统里注册绑定ID呢。到了提醒时间，我可能没办法自动打电话联系${elderPronoun(targetElder?.relation ?? "")}。要是有${elderPronoun(targetElder?.relation ?? "")}的联系方式，你亲自提醒一下会更稳妥哦。等${elderPronoun(targetElder?.relation ?? "")}注册绑定好了，我就能帮你自动触达啦~`,
-        });
-      } else if (identity?.userId && elderAccount.boundPartnerId !== identity.userId) {
-        addNotification({
-          title: `${draft.elderDisplayName}尚未与你绑定`,
-          detail: `${draft.elderDisplayName}已注册但还没和你完成绑定，任务暂时无法自动触达。`,
-          level: "warning",
-        });
-        appendAssistantMessage({
-          id: uid("msg"),
-          role: "assistant",
-          kind: "text",
-          content: `小提示~${draft.elderDisplayName}注册过了，但好像还没跟你绑定呢。你可以在「我的」页面发起绑定请求，等${elderPronoun(targetElder?.relation ?? "")}通过后我就能帮你自动联系啦~`,
-        });
-      }
+    // ── 校验提示（用户已确认创建，仍给信息性提示）───────────────────
+    if (notRegistered) {
+      addNotification({
+        title: `${draft.elderDisplayName}尚未绑定ID`,
+        detail: `${draft.elderDisplayName}还没有注册账号，到了时间可能无法通过电话触达。建议你亲自提醒一下哦。`,
+        level: "warning",
+      });
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "text",
+        content: `对了，提醒你一下~${draft.elderDisplayName}好像还没有在系统里注册绑定ID呢。到了提醒时间，我可能没办法自动打电话联系${elderPronoun(targetElder.relation ?? "")}。要是有${elderPronoun(targetElder.relation ?? "")}的联系方式，你亲自提醒一下会更稳妥哦。等${elderPronoun(targetElder.relation ?? "")}注册绑定好了，我就能帮你自动触达啦~`,
+      });
+    } else if (notBoundWithMe) {
+      addNotification({
+        title: `${draft.elderDisplayName}尚未与你绑定`,
+        detail: `${draft.elderDisplayName}已注册但还没和你完成绑定，任务暂时无法自动触达。`,
+        level: "warning",
+      });
+      appendAssistantMessage({
+        id: uid("msg"),
+        role: "assistant",
+        kind: "text",
+        content: `小提示~${draft.elderDisplayName}注册过了，但好像还没跟你绑定呢。你可以在「我的」页面发起绑定请求，等${elderPronoun(targetElder.relation ?? "")}通过后我就能帮你自动联系啦~`,
+      });
     }
   }
 

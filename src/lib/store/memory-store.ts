@@ -35,7 +35,9 @@ export class MemoryStore {
   hookCandidates: HookCandidate[];
   proactiveMessages: ProactiveMessage[];
 
-  private idCounter = 100;
+  // 复杂版本 ID 生成器：36进制时间戳 + 6位随机后缀 + Set 防重
+  // 优势：跨 serverless 实例不冲突 + 单实例绝对唯一 + 时间维度有序
+  private usedIds = new Set<string>();
 
   constructor(seed: SeedData) {
     this.familyId = seed.familyId;
@@ -56,7 +58,17 @@ export class MemoryStore {
   }
 
   genId(prefix: string): string {
-    return `${prefix}_${String(++this.idCounter).padStart(3, "0")}`;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const ts = Date.now().toString(36);
+      const rand = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+      const candidate = `${prefix}_${ts}_${rand}`;
+      if (!this.usedIds.has(candidate)) {
+        this.usedIds.add(candidate);
+        return candidate;
+      }
+    }
+    // 极端碰撞兜底：再加 4 位随机
+    return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
   }
 
   // --- Elders ---
